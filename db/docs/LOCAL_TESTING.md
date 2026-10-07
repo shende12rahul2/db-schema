@@ -36,6 +36,12 @@ ls db                           # baseline  docker-compose.yml  docs  examples  
 ```
 If you already had a clone: `git fetch origin && git checkout claude/versioned-db-structure && git pull`.
 
+Check which database the tools will use (from `db/config/`; default = local Docker DB):
+```bash
+./db/scripts/migrate.sh config
+```
+Expected: `environment : local`, `runner : docker`, `connection : bank@//localhost:1521/FREEPDB1   password: set`.
+
 Static checks need no database:
 ```bash
 ./db/scripts/lint_migrations.sh
@@ -65,7 +71,7 @@ Check: `docker ps` shows `oracle-free` with status `(healthy)`.
 ```
 Expected:
 ```
-Target   : bank@//localhost:1521/FREEPDB1   ENVIRONMENT=local
+Target   : bank@//localhost:1521/FREEPDB1   DB_ENV=local
 History  : none yet (fresh database) - schema_version will be created by migrate
 
 1) Versioned migrations, run once, in this order:
@@ -74,6 +80,7 @@ History  : none yet (fresh database) - schema_version will be created by migrate
    3. V003  migrations/V003__loan_status_check.sql
    4. V004  migrations/V004__create_customer_preferences.sql
    5. V005  migrations/V005__index_transactions_account_date.sql
+   6. V006  migrations/V006__cleanup_legacy_invalid_objects.sql
 
 2) Repeatable files, run after the migrations:
    - repeatable/01_types/t_address_typ.tps  (new)
@@ -121,6 +128,8 @@ Expected (abridged):
    V004 OK
 -> applying V005  index_transactions_account_date
    V005 OK
+-> applying V006  cleanup_legacy_invalid_objects     (does nothing on a new DB)
+   V006 OK
 -> applying 78 repeatable file(s):
    repeatable/01_types/t_address_typ.tps  (new)
    ...
@@ -135,7 +144,7 @@ MIGRATE OK
 ```bash
 ./db/scripts/migrate.sh validate      # expected: VALIDATE OK
 ./db/scripts/migrate.sh smoke         # object counts, function results, a test insert (rolled back)
-./db/scripts/migrate.sh status        # V001..V005 SUCCESS; Pending: (none); Repeatable: (none)
+./db/scripts/migrate.sh status        # V001..V006 SUCCESS; Pending: (none); Repeatable: (none)
 ./db/scripts/migrate.sh plan          # both sections "(none)"
 ```
 In the `smoke` output check:
@@ -180,31 +189,31 @@ git checkout -- db/repeatable/03_functions/fn_format_currency.fnc
 
 ```bash
 ./db/scripts/new_migration.sh "add account nickname"
-cat >> db/migrations/V006__add_account_nickname.sql <<'SQL'
+cat >> db/migrations/V007__add_account_nickname.sql <<'SQL'
 ALTER TABLE accounts ADD (nickname VARCHAR2(40));
 SQL
-cat >> db/migrations/undo/U006__add_account_nickname.sql <<'SQL'
+cat >> db/migrations/undo/U007__add_account_nickname.sql <<'SQL'
 ALTER TABLE accounts DROP COLUMN nickname;
 SQL
 ./db/scripts/lint_migrations.sh        # LINT OK
-./db/scripts/migrate.sh plan --sql     # V006 listed with its SQL
-./db/scripts/migrate.sh step           # V006 OK
+./db/scripts/migrate.sh plan --sql     # V007 listed with its SQL
+./db/scripts/migrate.sh step           # V007 OK
 ./db/scripts/migrate.sh sql "SELECT column_name FROM user_tab_columns WHERE table_name='ACCOUNTS' AND column_name='NICKNAME'"
 ```
 Expected: one row `NICKNAME`.
 
 Undo and re-apply:
 ```bash
-./db/scripts/migrate.sh undo           # -> undoing V006 ... V006 undone.
+./db/scripts/migrate.sh undo           # -> undoing V007 ... V007 undone.
 ./db/scripts/migrate.sh sql "SELECT column_name FROM user_tab_columns WHERE table_name='ACCOUNTS' AND column_name='NICKNAME'"   # no rows selected
-./db/scripts/migrate.sh status         # V006 shows UNDONE and is pending again
-./db/scripts/migrate.sh migrate        # V006 OK, MIGRATE OK
+./db/scripts/migrate.sh status         # V007 shows UNDONE and is pending again
+./db/scripts/migrate.sh migrate        # V007 OK, MIGRATE OK
 ./db/scripts/migrate.sh validate       # VALIDATE OK
 ```
-Clean up so the next steps start from V005:
+Clean up so the next steps start from V006:
 ```bash
 ./db/scripts/migrate.sh undo
-rm db/migrations/V006__add_account_nickname.sql db/migrations/undo/U006__add_account_nickname.sql
+rm db/migrations/V007__add_account_nickname.sql db/migrations/undo/U007__add_account_nickname.sql
 ./db/scripts/migrate.sh validate       # VALIDATE OK (an UNDONE version without a file is fine)
 ```
 
@@ -214,30 +223,30 @@ rm db/migrations/V006__add_account_nickname.sql db/migrations/undo/U006__add_acc
 
 Statement 1 is fine, statement 2 has a typo (`overdraft_limt`):
 ```bash
-cp db/examples/failing/V900__broken_example.sql db/migrations/V006__broken_example.sql
-cp db/examples/failing/U900__broken_example.sql db/migrations/undo/U006__broken_example.sql
+cp db/examples/failing/V900__broken_example.sql db/migrations/V007__broken_example.sql
+cp db/examples/failing/U900__broken_example.sql db/migrations/undo/U007__broken_example.sql
 ./db/scripts/migrate.sh migrate
 ```
-Expected: `ORA-00904: "OVERDRAFT_LIMT": invalid identifier`, then `x V006 FAILED ... The database may be PARTIALLY changed` with the 4 recovery steps.
+Expected: `ORA-00904: "OVERDRAFT_LIMT": invalid identifier`, then `x V007 FAILED ... The database may be PARTIALLY changed` with the 4 recovery steps.
 
 See the partial state and the block:
 ```bash
-./db/scripts/migrate.sh status         # V006 FAILED
+./db/scripts/migrate.sh status         # V007 FAILED
 ./db/scripts/migrate.sh sql "SELECT column_name FROM user_tab_columns WHERE table_name='ACCOUNTS' AND column_name='OVERDRAFT_LIMIT'"   # exists! (DDL auto-committed)
-./db/scripts/migrate.sh migrate        # refused: "V006 is recorded as FAILED ..."
+./db/scripts/migrate.sh migrate        # refused: "V007 is recorded as FAILED ..."
 ```
 Recover:
 ```bash
 ./db/scripts/migrate.sh sql "ALTER TABLE accounts DROP COLUMN overdraft_limit"   # 1. undo the partial change by hand
 ./db/scripts/migrate.sh repair                                                   # 2. clear the FAILED row
-sed -i.bak 's/overdraft_limt/overdraft_limit/' db/migrations/V006__broken_example.sql && rm db/migrations/V006__broken_example.sql.bak   # 3. fix the file
-./db/scripts/migrate.sh migrate                                                  # 4. V006 OK, MIGRATE OK
+sed -i.bak 's/overdraft_limt/overdraft_limit/' db/migrations/V007__broken_example.sql && rm db/migrations/V007__broken_example.sql.bak   # 3. fix the file
+./db/scripts/migrate.sh migrate                                                  # 4. V007 OK, MIGRATE OK
 ./db/scripts/migrate.sh validate
 ```
 Clean up:
 ```bash
 ./db/scripts/migrate.sh undo
-rm db/migrations/V006__broken_example.sql db/migrations/undo/U006__broken_example.sql
+rm db/migrations/V007__broken_example.sql db/migrations/undo/U007__broken_example.sql
 ```
 
 ---
@@ -262,9 +271,9 @@ Each example branch adds migrations the others do not have, so start each one fr
 ./db/scripts/migrate.sh down                    # wipe the local DB
 git checkout claude/versioned-db-structure
 ./db/scripts/migrate.sh up
-./db/scripts/migrate.sh deploy                  # DB at V005 = base version -> DEPLOY OK
+./db/scripts/migrate.sh deploy                  # DB at V006 = base version -> DEPLOY OK
 git checkout example/tables                     # the branch under test
-./db/scripts/migrate.sh plan --sql              # only the branch's changes: V006-V008 + its repeatable files
+./db/scripts/migrate.sh plan --sql              # only the branch's changes: V007-V009 + its repeatable files
 ```
 Then follow **"Try it and verify by hand"** at the end of that branch's page (`step`, the `sql` checks with expected
 results, `migrate`, `validate`, `undo`). To test the next branch, repeat the block above with the other branch name.
@@ -279,7 +288,7 @@ results, `migrate`, `validate`, `undo`). To test the next branch, repeat the blo
 | `example/packages-types-triggers` | `db/docs/examples/packages-types-triggers.md` |
 
 Why the reset: if you switch from one example branch to another on the same DB, `validate` correctly reports
-"V008 was applied but its file is missing" - the database is ahead of the code you checked out.
+"V009 was applied but its file is missing" - the database is ahead of the code you checked out.
 
 ---
 
@@ -290,7 +299,7 @@ git checkout claude/versioned-db-structure
 ./db/scripts/migrate.sh down
 ./db/scripts/migrate.sh up
 ./db/scripts/migrate.sh deploy         # DEPLOY OK
-./db/scripts/migrate.sh undo           # V005 undone
+./db/scripts/migrate.sh undo           # V006 undone
 ./db/scripts/migrate.sh migrate        # MIGRATE OK
 ./db/scripts/migrate.sh validate       # VALIDATE OK
 ```
@@ -304,10 +313,55 @@ docker image rm gvenzl/oracle-free:slim   # optional: frees about 1.5 GB
 
 ---
 
+## Step 14 (optional) - Point the tools at a database you already have
+
+```bash
+cp db/config/dev.conf.example db/config/dev.conf      # edit DB_HOST / DB_PORT / DB_SERVICE / DB_USER
+printf 'DB_PASSWORD=your-password\n' > db/config/dev.secret.conf   # git-ignored
+./db/scripts/migrate.sh --env dev config               # password: set
+./db/scripts/migrate.sh --env dev up                   # starts only the small sqlplus helper container
+./db/scripts/migrate.sh --env dev plan                 # read-only
+```
+- Empty schema: `--env dev migrate`.
+- Schema already has the tables: `plan` says so; run `--env dev baseline <version>` first (see [CONFIGURATION.md](CONFIGURATION.md) section 3).
+- DB on this same machine: `DB_HOST=host.docker.internal`. Connection problems: `--env dev sql "SELECT 1 FROM dual"` shows the Oracle error.
+
+## Step 15 (optional) - Create a new project with the same structure
+
+```bash
+./db/scripts/init_project.sh ../my-new-project mynew
+cd ../my-new-project
+./db/scripts/migrate.sh config          # container mynew-oracle, user mynew
+./db/scripts/lint_migrations.sh         # LINT OK (empty project)
+./db/scripts/new_migration.sh "create first table"
+```
+Running it next to this project at the same time? Set `HOST_PORT=1522` in its `db/config/default.conf` first.
+
+## Step 16 (optional) - Adopt a database that already has the legacy objects
+
+Re-creates the situation "the schema was deployed with the old flat files" and adopts it.
+```bash
+./db/scripts/migrate.sh down                         # remove the managed local DB (frees port 1521)
+git checkout main                                    # old layout
+docker run -d --name oracle-free -p 1521:1521 -e ORACLE_PASSWORD=Oracle123 \
+  -e APP_USER=bank -e APP_USER_PASSWORD=Bank123 gvenzl/oracle-free:slim
+docker logs -f oracle-free                           # wait for DATABASE IS READY TO USE!, then Ctrl+C
+./scripts/deploy.sh                                  # legacy deploy; it reports errors for the 8 empty type bodies (that is the point)
+git checkout claude/versioned-db-structure
+./db/scripts/migrate.sh --env legacy-local up        # sqlplus helper only
+./db/scripts/migrate.sh --env legacy-local sql "SELECT object_name FROM user_objects WHERE status='INVALID'"   # 8 type bodies
+./db/scripts/migrate.sh --env legacy-local plan      # "none, but the schema already has tables"
+./db/scripts/migrate.sh --env legacy-local migrate   # refused: baseline first
+./db/scripts/migrate.sh --env legacy-local baseline  # V001 marked as applied
+./db/scripts/migrate.sh --env legacy-local migrate   # V002..V006 + repeatable -> MIGRATE OK
+./db/scripts/migrate.sh --env legacy-local validate  # VALIDATE OK, no invalid objects left
+```
+Clean up: `./db/scripts/migrate.sh --env legacy-local down` (helper) and `docker rm -f oracle-free` (the legacy DB).
+
 ## Tester checklist
 
 - [ ] Step 2 `Oracle is ready.`
-- [ ] Step 3 plan lists V001-V005 and 78 repeatable files
+- [ ] Step 3 plan lists V001-V006 and 78 repeatable files
 - [ ] Step 4 `step` applies exactly one migration; `sql` shows it
 - [ ] Step 5 `MIGRATE OK`
 - [ ] Step 6 `VALIDATE OK`, smoke counts match, plan shows nothing pending
@@ -317,9 +371,12 @@ docker image rm gvenzl/oracle-free:slim   # optional: frees about 1.5 GB
 - [ ] Step 10 checksum drift is detected
 - [ ] Step 11 at least one example branch deploys and its checks pass
 - [ ] Step 12 fresh install + undo/redo pass
+- [ ] (optional) Step 14 `--env dev plan` works against your own DB
+- [ ] (optional) Step 15 new project created, `config` shows its own names
+- [ ] (optional) Step 16 legacy database adopted: baseline + migrate + `VALIDATE OK`
 
 If a step's output differs, save it and the log:
-`docker compose -f db/docker-compose.yml exec oracle cat /tmp/migrate.log > migrate.log`
+`./db/scripts/migrate.sh log > migrate.log`
 
 ## Troubleshooting
 

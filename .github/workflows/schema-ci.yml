@@ -31,12 +31,13 @@ jobs:
         run: ./db/scripts/migrate.sh plan
       - name: Undo/redo round trip of the newest migration
         run: |
+          if ! ls db/migrations/V*.sql >/dev/null 2>&1; then echo "no migrations yet - skipping"; exit 0; fi
           ./db/scripts/migrate.sh undo
           ./db/scripts/migrate.sh migrate
           ./db/scripts/migrate.sh validate
       - name: Collect log
         if: always()
-        run: docker compose -f db/docker-compose.yml exec -T oracle cat /tmp/migrate.log > migrate.log || true
+        run: ./db/scripts/migrate.sh log > migrate.log || true
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: migrate-log, path: migrate.log }

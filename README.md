@@ -11,7 +11,8 @@ db/                      <- live, versioned schema (use this)
     05_package_specs  06_package_bodies  07_triggers  08_views
   scripts/               migrate.sh, lint_migrations.sh, new_migration.sh, validate.sql ...
   docs/                  SCHEMA_VERSIONING.md (guide)  examples/ (one page per change type)
-  docker-compose.yml     local Oracle
+  config/                DB + file settings per environment (default.conf, local.conf, <env>.conf, <env>.secret.conf)
+  docker-compose.yml     local Oracle / sqlplus helper (values from config/)
   migrate.cmd            Windows launcher
 legacy/                  original flat layout, reference only (not used by any tool)
 ```
@@ -47,6 +48,26 @@ Clone note for Windows: `.gitattributes` forces LF line endings so scripts work 
 
 Already used the earlier `docker run --name oracle-free ...` container? Remove it first: `docker rm -f oracle-free`. If your database was built from the old flat files, run `migrate baseline` once, then `migrate`.
 
+## Configuration (DB details, paths, environments)
+
+Nothing about the database or the folder layout is hard-coded in the scripts; it is all in `db/config/`.
+
+```bash
+./db/scripts/migrate.sh config               # effective settings for the default environment (local)
+./db/scripts/migrate.sh --env dev config     # another environment
+```
+
+| I want to... | Do this |
+|---|---|
+| keep using the local Docker DB I already created | nothing: `config/default.conf` keeps the same container (`oracle-free`, compose project `db`) and data |
+| adopt a DB that already has the legacy objects (deployed with `main`'s `scripts/deploy.sh`) | `migrate.sh --env legacy-local plan`, then `baseline`, then `migrate` (CONFIGURATION.md section 3) |
+| use an Oracle DB I already have (laptop, VM, server) | `cp db/config/dev.conf.example db/config/dev.conf`, edit host/port/service/user, put `DB_PASSWORD=...` in `db/config/dev.secret.conf` (git-ignored), then `--env dev up` and `--env dev plan`; adopt it with `--env dev baseline <version>` if the schema already exists |
+| add test / prod | `config/test.conf`, `config/prod.conf` (templates provided); `prod` requires `CONFIRM=yes` |
+| change folders, history table name, smoke script, container name/port/image | edit `config/default.conf` |
+| start another project with the same structure (no bank objects) | `./db/scripts/init_project.sh ../other-repo other` |
+
+Every key, precedence rules and the existing-database walkthrough: [`db/docs/CONFIGURATION.md`](db/docs/CONFIGURATION.md).
+
 ## Flow: branch -> PR -> main -> environments
 
 Step-by-step with expected output and verification queries: **[`db/docs/RUNBOOK.md`](db/docs/RUNBOOK.md)**.
@@ -56,7 +77,7 @@ First time? Test everything locally with **[`db/docs/LOCAL_TESTING.md`](db/docs/
 2. Locally: `plan --sql` -> `step` -> verify with `sql "..."` -> `migrate` -> `validate` -> `undo` -> `migrate` (proves rollback).
 3. PR to `main`: CI runs lint, a fresh install, and an undo/redo round trip.
 4. Merge: **no database changes**; `main` is what each environment should reach next.
-5. Release (manual, per environment): `CONN=... ENVIRONMENT=...` `status` -> `plan --sql` -> backup -> `migrate` -> `validate` -> `smoke` -> git tag.
+5. Release (manual, per environment): `--env <name>` (settings in `db/config/`) `status` -> `plan --sql` -> backup -> `migrate` -> `validate` -> `smoke` -> git tag.
 
 ## How changes are made (short version)
 
