@@ -1,15 +1,15 @@
-# Data migrations - 3 examples (branch `example/data-migrations`, V012-V014)
+# Data migrations - 3 examples (branch `example/data-migrations`, V013-V015)
 
 Data changes are versioned migrations too. Three habits keep them safe: **idempotent** (re-runnable), **batched** (small commits), **reversible** (backup table).
 
-## 1. Seed reference data (`V012__create_ref_loan_types.sql`)
-`MERGE` inserts missing rows and updates existing ones, so re-running after a partial failure is harmless. Later changes to the reference data (new loan type) are new migrations, never edits of V012.
+## 1. Seed reference data (`V013__create_ref_loan_types.sql`)
+`MERGE` inserts missing rows and updates existing ones, so re-running after a partial failure is harmless. Later changes to the reference data (new loan type) are new migrations, never edits of V013.
 
-## 2. Batched backfill (`V013__backfill_credit_score_risk_band.sql`)
+## 2. Batched backfill (`V014__backfill_credit_score_risk_band.sql`)
 Updating millions of rows in one statement fills undo space and holds locks. Loop with `ROWNUM <= 10000` and `COMMIT` per batch.
 Because committed batches cannot roll back, the migration first records the affected IDs (`credit_scores_bak_v013`); the undo script uses them.
 
-## 3. Data clean-up with a backup (`V014__normalize_customer_contacts.sql`)
+## 3. Data clean-up with a backup (`V015__normalize_customer_contacts.sql`)
 Create `<table>_bak_v014` with the old values, update, and let undo restore from it. Possible failure: upper-casing creates a duplicate PAN
 (`ORA-00001`). Then: fix the offending rows, `migrate.sh repair`, drop `customers_bak_v014`, re-run `migrate`.
 
@@ -25,14 +25,14 @@ git checkout example/data-migrations
 ./db/scripts/migrate.sh plan --sql    # read-only: what will run and why
 ```
 
-**V012 - reference data**
+**V013 - reference data**
 ```bash
 ./db/scripts/migrate.sh step
 ./db/scripts/migrate.sh sql "SELECT * FROM ref_loan_types ORDER BY loan_type"
 ```
 Expected: 4 rows (AUTO, EDUCATION, HOME, PERSONAL).
 
-**V013 - batched backfill.** First create a test row to backfill (local DB only; the explicit `COMMIT` keeps it):
+**V014 - batched backfill.** First create a test row to backfill (local DB only; the explicit `COMMIT` keeps it):
 ```bash
 ./db/scripts/migrate.sh sql <<'SQL'
 INSERT INTO branches (branch_id, branch_code, branch_name) VALUES (seq_branch_id.NEXTVAL, 'T001', 'Test');
@@ -46,7 +46,7 @@ SQL
 ```
 Expected: `720 MEDIUM`, `rows_touched 1`. Without the `COMMIT`, `sql` would have rolled the test rows back.
 
-**V014 - data fix with backup**
+**V015 - data fix with backup**
 ```bash
 ./db/scripts/migrate.sh sql <<'SQL'
 UPDATE customers SET mobile = '+91 98765-43210', pan_number = ' abcde1234f ' WHERE ROWNUM = 1;
