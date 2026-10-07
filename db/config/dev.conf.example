@@ -1,0 +1,11 @@
+# Example: an Oracle database you ALREADY HAVE (installed on this machine, a VM, or a server).
+# Copy to config/dev.conf, put the password in config/dev.secret.conf (git-ignored), then:  DB_ENV=dev migrate.sh plan
+#
+# RUNNER=docker-client : a small helper container provides sqlplus and connects to DB_HOST (no local Oracle client needed)
+# RUNNER=local         : use sqlplus installed on this machine (Oracle Instant Client + SQL*Plus on PATH)
+RUNNER=docker-client
+# DB on this same machine (Docker Desktop / Linux): host.docker.internal ; a server: its host name or IP
+DB_HOST=host.docker.internal
+DB_PORT=1521
+DB_SERVICE=ORCLPDB1
+DB_USER=bank

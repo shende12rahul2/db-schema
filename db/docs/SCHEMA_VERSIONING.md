@@ -26,7 +26,7 @@ See also the step-by-step [RUNBOOK](RUNBOOK.md) (branch -> PR -> main -> environ
 Run order on every `migrate`: all pending versioned migrations (ascending), then all changed repeatable files in folder order.
 
 Current versions: V001 baseline, V002 `customers.email_verified`, V003 loan status check, V004 `customer_preferences`
-(+ trigger in `Trigger/`), V005 index on `transactions`.
+(+ trigger in `07_triggers/`), V005 index on `transactions`, V006 cleanup of invalid empty type bodies left by legacy deployments (no-op on new databases).
 
 ## 2. How a change travels
 
@@ -44,8 +44,8 @@ local: deploy.sh               fresh install on empty Oracle          3. recompi
 Daily workflow:
 
 ```bash
-./db/scripts/new_migration.sh "add customer nickname"   # creates V006 + U006 skeletons
-# edit migrations/V006__add_customer_nickname.sql and the undo file; edit code objects if needed
+./db/scripts/new_migration.sh "add customer nickname"   # creates V007 + U007 skeletons
+# edit migrations/V007__add_customer_nickname.sql and the undo file; edit code objects if needed
 ./db/scripts/lint_migrations.sh                          # static checks, no DB needed
 ./db/scripts/migrate.sh migrate                          # apply to your local DB
 ./db/scripts/migrate.sh status                           # see history + pending
@@ -73,9 +73,9 @@ Daily workflow:
 | `validate` | Verify DB history against files; exit code 1 on any problem |
 | `undo` | Revert the **most recent** versioned migration via its `U` file |
 | `repair` | Delete `FAILED` rows after you cleaned up a failed migration |
-| `baseline` | Adopt a database that was built with the old `deploy.sh` (marks V001 applied) |
+| `baseline [ver]` | Adopt an existing database: mark migrations up to `ver` (default V001) as applied |
 
-Environment: `CONTAINER`, `CONN`, `ENVIRONMENT=prod` (then `migrate/undo/repair` need `CONFIRM=yes`), `OUT_OF_ORDER=1`.
+Environment: `--env <name>` selects `config/<name>.conf` (see [CONFIGURATION.md](CONFIGURATION.md)); protected environments (`prod`) need `CONFIRM=yes`; `OUT_OF_ORDER=1`.
 
 ## 5. Handling errors: key facts
 
@@ -86,6 +86,8 @@ Environment: `CONTAINER`, `CONN`, `ENVIRONMENT=prod` (then `migrate/undo/repair`
 - Take a backup/snapshot before touching production (Data Pump `expdp`, or a storage snapshot); undo scripts are not a backup.
 
 ## 6. Examples
+
+Version numbers in these scenarios are illustrative ("the next free number").
 
 ### A. Add a column (happy path) - V002
 
@@ -183,11 +185,11 @@ Fix on the branch that merged second, **before it is applied anywhere**: rename 
 V004 created `customer_preferences` and caused a production problem, but V005 (the index) was applied after it.
 Undo works newest-first, so run `undo` once per migration:
 ```bash
-export ENVIRONMENT=prod CONFIRM=yes
-./db/scripts/migrate.sh undo          # reverts V005 (newest)
-./db/scripts/migrate.sh undo          # reverts V004
-git checkout <previous-release-tag>   # older code objects
-./db/scripts/migrate.sh migrate       # redeploys the older code objects (their checksum differs)
+export CONFIRM=yes
+./db/scripts/migrate.sh --env prod undo      # reverts V005 (newest)
+./db/scripts/migrate.sh --env prod undo      # reverts V004
+git checkout <previous-release-tag>          # older code objects
+./db/scripts/migrate.sh --env prod migrate   # redeploys the older code objects (their checksum differs)
 ```
 Rules: undo reverts only the **latest** applied migration, so undo newest-first. Run undo from the **newer** checkout
 (the undo file only exists there), then switch code. Undo does not bring back deleted data - restore from backup if the
@@ -209,16 +211,21 @@ ALTER TABLE customers DROP COLUMN mobile;
 ```
 Undo for V007 can only re-add the empty column - take a backup before contracting.
 
-### H. Adopt a database created with the old `deploy.sh`
+### H. Adopt a database that already has the legacy objects
 
-You already have a database with tables but no history:
+The schema was built with the legacy flat files (`main`'s `scripts/deploy.sh`): tables and code exist, no history table.
 ```
-$ ./db/scripts/migrate.sh migrate
-ERROR: tables already exist but there is no history. Run ./db/scripts/migrate.sh baseline first.
-$ ./db/scripts/migrate.sh baseline
-baselined at V001. Run ./db/scripts/migrate.sh migrate to apply newer versions.
-$ ./db/scripts/migrate.sh migrate        # applies V002..V005 and the code objects
+$ ./db/scripts/migrate.sh --env legacy-local plan
+History  : none, but the schema already has tables -> run 'baseline <version>' first (migrate will refuse)
+$ ./db/scripts/migrate.sh --env legacy-local migrate
+ERROR: the database already has tables but no history in schema_version. Adopt it first: migrate.sh baseline <version>
+$ ./db/scripts/migrate.sh --env legacy-local baseline          # legacy content = V001
+   V001 marked as applied (baseline, not executed)
+$ ./db/scripts/migrate.sh --env legacy-local migrate           # V002..V006, then every repeatable file once
+$ ./db/scripts/migrate.sh --env legacy-local validate          # VALIDATE OK
 ```
+V006 drops the 8 empty type bodies the legacy deployment left INVALID. `legacy-local` = the old `docker run` container;
+for any other database use your own environment file (CONFIGURATION.md section 3).
 
 ### I. A migration breaks a view or package (invalid objects)
 
@@ -252,7 +259,7 @@ the row is `FAILED`, and you fix the file and run `migrate` again (`CREATE OR RE
 
 1. `lint_migrations.sh` green, CI green on a fresh database.
 2. Backup/snapshot taken (production).
-3. `ENVIRONMENT=prod CONFIRM=yes ./db/scripts/migrate.sh migrate`.
+3. `CONFIRM=yes ./db/scripts/migrate.sh --env prod migrate`.
 4. `./db/scripts/migrate.sh validate` and `db/scripts/validate.sql` smoke tests.
 5. Tag the release in git (the tag + `schema_version` together describe the deployed state).
 
@@ -285,4 +292,4 @@ The runner needs only Docker. On the host, `migrate.sh` (macOS/Linux/Git Bash/WS
 starts the compose file in `db/` and executes the real runner **inside the container**, which has bash, sqlplus and the Linux tools it uses.
 `.gitattributes` forces LF line endings so a Windows checkout still works in the container.
 `lint_migrations.sh` and `new_migration.sh` are plain bash and run on the host (Git Bash or WSL on Windows).
-Logs are written inside the container: `docker compose -f db/docker-compose.yml exec oracle cat /tmp/migrate.log`.
+Logs: `./db/scripts/migrate.sh log`. All connection and path settings: [CONFIGURATION.md](CONFIGURATION.md).
