@@ -50,6 +50,7 @@ Already used the earlier `docker run --name oracle-free ...` container? Remove i
 ## Flow: branch -> PR -> main -> environments
 
 Step-by-step with expected output and verification queries: **[`db/docs/RUNBOOK.md`](db/docs/RUNBOOK.md)**.
+First time? Test everything locally with **[`db/docs/LOCAL_TESTING.md`](db/docs/LOCAL_TESTING.md)** (13 steps, Windows/macOS/Linux).
 
 1. Feature branch: add a migration (`new_migration.sh`) and/or edit repeatable files; `lint_migrations.sh`.
 2. Locally: `plan --sql` -> `step` -> verify with `sql "..."` -> `migrate` -> `validate` -> `undo` -> `migrate` (proves rollback).
