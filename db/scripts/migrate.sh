@@ -21,7 +21,12 @@
 set -uo pipefail
 DB_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$DB_DIR"
-COMPOSE=(docker compose -f "$DB_DIR/docker-compose.yml")
+COMPOSE_FILE_HOST="$DB_DIR/docker-compose.yml"
+if [ -n "${MSYSTEM:-}" ]; then          # Git Bash / MSYS on Windows: no path mangling, Windows-style compose path
+  export MSYS_NO_PATHCONV=1
+  COMPOSE_FILE_HOST="$(cd "$DB_DIR" && pwd -W)/docker-compose.yml"
+fi
+COMPOSE=(docker compose -f "$COMPOSE_FILE_HOST")
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -29,10 +34,18 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 if ! command -v sqlplus >/dev/null 2>&1; then
   command -v docker >/dev/null 2>&1 || die "Docker is required (or a local sqlplus). Install Docker Desktop / Docker Engine."
   case "${1:-help}" in
-    up)   "${COMPOSE[@]}" up -d --wait && echo "Oracle is ready."; exit $? ;;
+    up)
+      svc=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' oracle-free 2>/dev/null || true)
+      if docker inspect oracle-free >/dev/null 2>&1 && [ "$svc" != "oracle" ]; then
+        die "a container named oracle-free already exists (from the old 'docker run' instructions). Remove it: docker rm -f oracle-free"
+      fi
+      echo "Starting Oracle (first run downloads the image and initialises the DB: a few minutes)..."
+      "${COMPOSE[@]}" up -d --wait && echo "Oracle is ready."; exit $? ;;
     down) "${COMPOSE[@]}" down -v; exit $? ;;
     help) sed -n '2,24p' "$0"; exit 0 ;;
   esac
+  [ -n "$("${COMPOSE[@]}" ps --status running -q oracle 2>/dev/null)" ] \
+    || die "the Oracle container is not running. Start it with: ${0} up"
   exec "${COMPOSE[@]}" exec -T -w /workspace/db \
     -e "CONN=${CONN:-}" -e "ENVIRONMENT=${ENVIRONMENT:-local}" -e "CONFIRM=${CONFIRM:-}" -e "OUT_OF_ORDER=${OUT_OF_ORDER:-0}" \
     oracle bash scripts/migrate.sh "$@"
