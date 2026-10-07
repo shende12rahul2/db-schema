@@ -1,6 +1,6 @@
 # Examples by change type
 
-Each page has 2-3 copy-paste examples. They also exist as ready-made branches (merge in this order so version numbers stay sequential):
+Each page has 2-3 copy-paste examples. Each page and its code live on the matching branch until you merge it (the links below work after the merge). Merge in this order so version numbers stay sequential; all six merge cleanly together (verified with a trial merge and lint) (merge in this order so version numbers stay sequential):
 
 | Branch | Change type | Versions | Page |
 |---|---|---|---|
