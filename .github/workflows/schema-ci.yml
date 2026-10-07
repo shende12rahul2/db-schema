@@ -23,8 +23,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Start Oracle (same compose file developers use)
         run: ./db/scripts/migrate.sh up
+      - name: Plan (what a fresh install runs)
+        run: ./db/scripts/migrate.sh plan
       - name: Fresh install - migrate, validate, smoke tests
         run: ./db/scripts/migrate.sh deploy
+      - name: Nothing left to apply
+        run: ./db/scripts/migrate.sh plan
       - name: Undo/redo round trip of the newest migration
         run: |
           ./db/scripts/migrate.sh undo
