@@ -1,0 +1,44 @@
+name: schema-ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Lint migrations (naming, undo pairs, duplicates)
+        run: ./scripts/lint_migrations.sh
+      - name: Applied migrations must not be edited
+        if: github.event_name == 'pull_request'
+        run: BASE_REF=origin/${{ github.base_ref }} ./scripts/lint_migrations.sh
+
+  migrate:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start Oracle
+        run: |
+          docker run -d --name oracle-free -p 1521:1521 \
+            -e ORACLE_PASSWORD=Oracle123 -e APP_USER=bank -e APP_USER_PASSWORD=Bank123 \
+            gvenzl/oracle-free:slim
+          for i in $(seq 1 60); do
+            docker logs oracle-free 2>&1 | grep -q "DATABASE IS READY TO USE" && exit 0
+            sleep 5
+          done
+          echo "Oracle did not start"; docker logs oracle-free; exit 1
+      - name: Fresh install (all migrations + code objects) and validate
+        run: ./scripts/deploy.sh
+      - name: Undo/redo round trip of the latest migration
+        run: |
+          ./scripts/migrate.sh undo
+          ./scripts/migrate.sh migrate
+          ./scripts/migrate.sh validate
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: migrate-logs, path: "*.log" }

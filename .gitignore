@@ -1,0 +1,2 @@
+*.log
+scripts/.deploy_all.sql

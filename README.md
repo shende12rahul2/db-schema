@@ -6,17 +6,20 @@ Oracle PL/SQL schema for a retail banking / lending system. One object per file.
 
 | Folder | Ext | Contents | Count |
 |---|---|---|---|
-| `Sequence/` | `.seq` | ID sequences | 12 |
-| `Table/` | `.tab` | Tables (PK / FK / unique) | 12 |
+| `Sequence/` | `.seq` | ID sequences (**frozen baseline**, see Schema versioning) | 12 |
+| `Table/` | `.tab` | Tables (**frozen baseline**; changes go in `migrations/`) | 12 |
 | `Type/` | `.tps` | Object type specs | 11 |
 | `Type_Body/` | `.tpb` | Object type bodies | 11 |
 | `Function/` | `.fnc` | Standalone functions | 11 |
 | `Procedure/` | `.prc` | Standalone procedures | 11 |
 | `Package/` | `.spc` | Package specs | 10 |
 | `Package_Body/` | `.bdy` | Package bodies | 10 |
-| `Trigger/` | `.trg` | Before-insert triggers (ID from sequence) | 10 |
+| `Trigger/` | `.trg` | Before-insert triggers (ID from sequence) | 11 |
 | `View/` | `.vw` | Reporting views | 11 |
-| `scripts/` | | `deploy.sh`, `validate.sql` | |
+| `migrations/` | `.sql` | Versioned migrations `V<NNN>__name.sql` and `undo/U<NNN>__name.sql` | 5 |
+| `scripts/` | | `migrate.sh`, `deploy.sh`, `validate.sql`, `new_migration.sh`, `lint_migrations.sh` | |
+| `docs/` | | `SCHEMA_VERSIONING.md` (worked examples) | |
+| `examples/failing/` | | Demo of a failing migration and its recovery | |
 
 > `pkg_login_otp` is a placeholder: OTP generation and verification are `TODO` (verify always returns `FALSE`).
 > `branches` and `credit_scores` have sequences but no insert trigger; pass `seq_branch_id.NEXTVAL` / `seq_credit_score_id.NEXTVAL` when inserting.
@@ -57,13 +60,31 @@ This creates the schema owner `bank` / `Bank123` in the `FREEPDB1` pluggable dat
 ./scripts/deploy.sh
 ```
 
-The script:
-1. Copies the repo into the container.
-2. Applies every file in dependency order: Sequence, Table (parents first), Type, Type_Body, Function, Procedure, Package, Package_Body, Trigger, View.
-3. Runs `scripts/validate.sql`.
-4. Writes the full output to `deploy.log` and prints `DEPLOY OK`, or exits non-zero if it saw `ORA-`/`PLS-` errors or compilation warnings.
+It runs: lint, `migrate.sh migrate` (all pending migrations, then code objects), `migrate.sh validate`, and the smoke tests in `scripts/validate.sql`.
+Output goes to `migrate.log` and `deploy.log`; the script prints `DEPLOY OK` or exits non-zero.
+Run `./scripts/migrate.sh status` at any time to see which version the database is at.
+
+Already have a database from the earlier version of this repo (tables but no history)? Run `./scripts/migrate.sh baseline` once, then `migrate`.
 
 Override defaults with `CONTAINER=... CONN=... ./scripts/deploy.sh`.
+
+## Schema versioning (how to change the database)
+
+Every change is a numbered migration; the database remembers what has been applied in the `schema_version` table.
+
+```bash
+./scripts/new_migration.sh "add customer nickname"   # creates migrations/V006__... and undo/U006__...
+# write the SQL (and the undo), edit code objects (Function/, Package/, View/ ...) if needed
+./scripts/lint_migrations.sh                          # static checks
+./scripts/migrate.sh migrate                          # apply to your DB
+./scripts/migrate.sh status | validate                # history / verification
+./scripts/migrate.sh undo                             # revert the newest migration
+./scripts/migrate.sh repair                           # after cleaning up a FAILED migration
+```
+
+Rules: never edit a migration after it is merged; table/sequence changes only via migrations; code objects (`Type` .. `View`) are edited in place and redeployed automatically.
+Full guide with 11 worked examples (add column, constraint failure, partial failure, checksum drift, duplicate version numbers, rollback, zero-downtime rename, baseline, invalid objects, out-of-order, hotfix): [`docs/SCHEMA_VERSIONING.md`](docs/SCHEMA_VERSIONING.md).
+CI (`.github/workflows/schema-ci.yml`) runs lint, a fresh install and an undo/redo round trip on every pull request.
 
 ## 3. Log in and run commands manually
 
@@ -87,7 +108,7 @@ Manual order: Sequence, then Table (`branches`, `customers`, `accounts`, `transa
 
 ## 4. Validate
 
-`deploy.sh` already runs this; to re-run it alone:
+`deploy.sh` already runs `migrate.sh validate` and this smoke test; to re-run the smoke test alone:
 
 ```bash
 docker exec -w /tmp/db-schema oracle-free sqlplus -s bank/Bank123@//localhost:1521/FREEPDB1 @scripts/validate.sql
@@ -97,12 +118,13 @@ Expected results:
 
 | Check | Expected |
 |---|---|
-| Object counts | SEQUENCE 12, TABLE 12, TYPE 11, FUNCTION 11, PROCEDURE 11, PACKAGE 10, PACKAGE BODY 10, TRIGGER 10, VIEW 11 |
+| Object counts | SEQUENCE 13, TABLE 14, TYPE 11, FUNCTION 11, PROCEDURE 11, PACKAGE 10, PACKAGE BODY 10, TRIGGER 11, VIEW 11 |
 | Invalid objects | `no rows selected` |
 | Compile errors (`user_errors`) | `no rows selected` |
 | `fn_calc_emi(500000, 9.5, 60)` | an EMI of about 10,500 |
 | `fn_mask_mobile('9876543210')` | `XXXXXX3210` |
-| Insert test | customer row returned with `kyc_status = PENDING` (then rolled back) |
+| Insert test | customer row returned with `kyc_status = PENDING`, `email_verified = N` (then rolled back) |
+| `./scripts/migrate.sh validate` | `VALIDATE OK` |
 
 Run `SHOW ERRORS` after any file that reports "created with compilation errors".
 
