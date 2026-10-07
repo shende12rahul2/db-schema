@@ -1,6 +1,6 @@
 -- Example 2 (data): backfill a column in batches so a huge table does not hold one giant transaction.
 -- Remember which rows we touch, so undo can revert exactly those.
-CREATE TABLE credit_scores_bak_v013 AS
+CREATE TABLE credit_scores_bak_v014 AS
 SELECT credit_score_id FROM credit_scores WHERE risk_band IS NULL;
 
 DECLARE

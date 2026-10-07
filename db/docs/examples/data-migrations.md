@@ -7,11 +7,11 @@ Data changes are versioned migrations too. Three habits keep them safe: **idempo
 
 ## 2. Batched backfill (`V014__backfill_credit_score_risk_band.sql`)
 Updating millions of rows in one statement fills undo space and holds locks. Loop with `ROWNUM <= 10000` and `COMMIT` per batch.
-Because committed batches cannot roll back, the migration first records the affected IDs (`credit_scores_bak_v013`); the undo script uses them.
+Because committed batches cannot roll back, the migration first records the affected IDs (`credit_scores_bak_v014`); the undo script uses them.
 
 ## 3. Data clean-up with a backup (`V015__normalize_customer_contacts.sql`)
-Create `<table>_bak_v014` with the old values, update, and let undo restore from it. Possible failure: upper-casing creates a duplicate PAN
-(`ORA-00001`). Then: fix the offending rows, `migrate.sh repair`, drop `customers_bak_v014`, re-run `migrate`.
+Create `<table>_bak_v015` with the old values, update, and let undo restore from it. Possible failure: upper-casing creates a duplicate PAN
+(`ORA-00001`). Then: fix the offending rows, `migrate.sh repair`, drop `customers_bak_v015`, re-run `migrate`.
 
 Production tips: take a real backup first, test on a copy of production volumes, and run long backfills outside business hours.
 
@@ -42,7 +42,7 @@ COMMIT;
 SQL
 ./db/scripts/migrate.sh step
 ./db/scripts/migrate.sh sql "SELECT score, risk_band FROM credit_scores"
-./db/scripts/migrate.sh sql "SELECT COUNT(*) AS rows_touched FROM credit_scores_bak_v013"
+./db/scripts/migrate.sh sql "SELECT COUNT(*) AS rows_touched FROM credit_scores_bak_v014"
 ```
 Expected: `720 MEDIUM`, `rows_touched 1`. Without the `COMMIT`, `sql` would have rolled the test rows back.
 
@@ -54,7 +54,7 @@ COMMIT;
 SQL
 ./db/scripts/migrate.sh step
 ./db/scripts/migrate.sh sql "SELECT customer_id, mobile, pan_number FROM customers"
-./db/scripts/migrate.sh sql "SELECT * FROM customers_bak_v014"
+./db/scripts/migrate.sh sql "SELECT * FROM customers_bak_v015"
 ./db/scripts/migrate.sh undo
 ./db/scripts/migrate.sh sql "SELECT customer_id, mobile, pan_number FROM customers"
 ```
