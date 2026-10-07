@@ -1,0 +1,7 @@
+# Production. Listed in PROTECTED_ENVS, so migrate/step/undo/repair need CONFIRM=yes.
+# Prefer passing DB_PASSWORD as an environment variable from your secret store instead of a file.
+RUNNER=docker-client
+DB_HOST=prod-db.example.local
+DB_PORT=1521
+DB_SERVICE=BANKPDB
+DB_USER=bank
