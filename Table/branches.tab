@@ -1,0 +1,11 @@
+CREATE TABLE branches (
+  branch_id      NUMBER(10)     NOT NULL,
+  branch_code    VARCHAR2(10)   NOT NULL,
+  branch_name    VARCHAR2(100)  NOT NULL,
+  ifsc_code      VARCHAR2(11),
+  city           VARCHAR2(60),
+  state          VARCHAR2(60),
+  created_at     TIMESTAMP      DEFAULT SYSTIMESTAMP NOT NULL,
+  CONSTRAINT pk_branches PRIMARY KEY (branch_id),
+  CONSTRAINT uk_branches_code UNIQUE (branch_code)
+);

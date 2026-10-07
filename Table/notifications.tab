@@ -1,0 +1,10 @@
+CREATE TABLE notifications (
+  notification_id NUMBER(12)    NOT NULL,
+  customer_id    NUMBER(10)     NOT NULL,
+  channel        VARCHAR2(10)   NOT NULL,
+  message        VARCHAR2(500)  NOT NULL,
+  status         VARCHAR2(10)   DEFAULT 'QUEUED' NOT NULL,
+  created_at     TIMESTAMP      DEFAULT SYSTIMESTAMP NOT NULL,
+  CONSTRAINT pk_notifications PRIMARY KEY (notification_id),
+  CONSTRAINT fk_notifications_customer_id FOREIGN KEY (customer_id) REFERENCES customers (customer_id)
+);

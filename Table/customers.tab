@@ -1,0 +1,15 @@
+CREATE TABLE customers (
+  customer_id    NUMBER(10)     NOT NULL,
+  first_name     VARCHAR2(60)   NOT NULL,
+  last_name      VARCHAR2(60)   NOT NULL,
+  date_of_birth  DATE,
+  pan_number     VARCHAR2(10),
+  mobile         VARCHAR2(15),
+  email          VARCHAR2(120),
+  kyc_status     VARCHAR2(15)   DEFAULT 'PENDING' NOT NULL,
+  branch_id      NUMBER(10),
+  created_at     TIMESTAMP      DEFAULT SYSTIMESTAMP NOT NULL,
+  CONSTRAINT pk_customers PRIMARY KEY (customer_id),
+  CONSTRAINT uk_customers_pan UNIQUE (pan_number),
+  CONSTRAINT fk_customers_branch_id FOREIGN KEY (branch_id) REFERENCES branches (branch_id)
+);
