@@ -19,7 +19,7 @@ Commands are shown for macOS/Linux; on Windows replace `./db/scripts/migrate.sh`
 | `up` / `down` | starts / wipes local container | local Oracle |
 | `plan` / `plan --sql` | **no** | see exactly what will run, in order, and why |
 | `status` | no | history + pending |
-| `sql "SELECT ..."` | only if you write DML | verify by hand |
+| `sql "SELECT ..."` | no: DML is rolled back at the end (DDL is not) | verify by hand; multi-line via stdin |
 | `step` | yes, one migration | apply the next migration only, then inspect |
 | `migrate` | yes | apply all pending migrations, then changed/missing repeatable files |
 | `validate` | no | history matches files, no invalid or missing objects |
@@ -169,6 +169,15 @@ Logs: every statement and its output is in the container log:
 `docker compose -f db/docker-compose.yml exec oracle cat /tmp/migrate.log`.
 
 ## 8. Verification queries (copy/paste into `sql "..."`)
+
+Multi-line checks (macOS/Linux/Git Bash) - the insert is rolled back automatically when the session ends:
+```bash
+./db/scripts/migrate.sh sql <<'SQL'
+INSERT INTO branches (branch_id, branch_code, branch_name) VALUES (seq_branch_id.NEXTVAL, 'T001', 'Test');
+SELECT branch_id, branch_code FROM branches WHERE branch_code = 'T001';
+SQL
+```
+
 
 ```sql
 SELECT installed_rank, version, type, status, script, installed_on FROM schema_version ORDER BY installed_rank

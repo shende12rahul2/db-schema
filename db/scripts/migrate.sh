@@ -8,6 +8,7 @@
 #   migrate   apply all pending versioned migrations, then changed/missing repeatable objects
 #   status    history, pending migrations, changed repeatable objects
 #   sql "..." run an ad-hoc query for manual verification, e.g. sql "SELECT * FROM schema_version"
+#             (multi-line: pipe a script on stdin; DML is ROLLED BACK at the end, DDL is not)
 #   validate  history vs files (checksums, order, FAILED rows) + invalid objects
 #   undo      revert the most recent versioned migration (needs migrations/undo/U<ver>__*.sql)
 #   repair    remove FAILED rows after you cleaned up a failed migration
@@ -30,7 +31,7 @@ if ! command -v sqlplus >/dev/null 2>&1; then
   case "${1:-help}" in
     up)   "${COMPOSE[@]}" up -d --wait && echo "Oracle is ready."; exit $? ;;
     down) "${COMPOSE[@]}" down -v; exit $? ;;
-    help) sed -n '2,23p' "$0"; exit 0 ;;
+    help) sed -n '2,24p' "$0"; exit 0 ;;
   esac
   exec "${COMPOSE[@]}" exec -T -w /workspace/db \
     -e "CONN=${CONN:-}" -e "ENVIRONMENT=${ENVIRONMENT:-local}" -e "CONFIRM=${CONFIRM:-}" -e "OUT_OF_ORDER=${OUT_OF_ORDER:-0}" \
@@ -416,7 +417,7 @@ cmd_sql() {
   local stmt=${1:-}
   [ -z "$stmt" ] && stmt=$(cat)
   case "$stmt" in *";") ;; *) stmt="$stmt;";; esac
-  { echo "SET LINESIZE 220 PAGESIZE 200 FEEDBACK ON TRIMOUT ON"; echo "COLUMN script FORMAT A60"; echo "COLUMN description FORMAT A40"; echo "COLUMN checksum FORMAT A12 TRUNCATED"; echo "$stmt"; echo "EXIT"; } | sq
+  { echo "SET LINESIZE 220 PAGESIZE 200 FEEDBACK ON TRIMOUT ON"; echo "COLUMN script FORMAT A60"; echo "COLUMN description FORMAT A40"; echo "COLUMN checksum FORMAT A12 TRUNCATED"; echo "$stmt"; echo "EXIT ROLLBACK"; } | sq
 }
 
 cmd_smoke() { connect_check; run_script scripts/validate.sql; }
@@ -433,5 +434,5 @@ case "${1:-help}" in
   baseline) cmd_baseline ;;
   smoke)    cmd_smoke ;;
   deploy)   cmd_migrate && cmd_validate && cmd_smoke && echo "DEPLOY OK" ;;
-  *) sed -n '2,23p' "$0" ;;
+  *) sed -n '2,24p' "$0" ;;
 esac
