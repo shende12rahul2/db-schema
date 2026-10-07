@@ -66,7 +66,7 @@ Both kinds can be in the same branch (typical when code needs a new column).
 ```
 Expected (abridged):
 ```
-Target   : bank@//localhost:1521/FREEPDB1   DB_ENV=local
+Target: BANK@FREEPDB1 (db FREE, localhost:1521) app env 'dev'
 Current  : V007
 Checks   :
   history OK
@@ -128,29 +128,30 @@ Main stays releasable because every PR passed a fresh install against main.
 
 ## 6. Release to an environment (after merge)
 
-Run from a clean checkout of `main` (or a release tag). Each target database is an **environment** in `db/config/`
-(set up once, see [CONFIGURATION.md](CONFIGURATION.md)): `test.conf` / `prod.conf` hold host, port, service and user
-(committed); the password goes in the git-ignored `test.secret.conf` or the `DB_PASSWORD` environment variable.
+Run from a clean checkout of `main` (or a release tag). Each target database is an `.env.<name>` file (see
+[CONFIGURATION.md](CONFIGURATION.md)): host, port, service, schema user, `APP_ENV`, and `EXPECTED_DB` (the database you intend to
+change). Credentials stay out of git: `.env*` files are git-ignored; pass `DB_PASSWORD` from your secret store if you prefer.
 
 ```bash
 git checkout main && git pull
-./db/scripts/migrate.sh --env test config         # check target + "password: set"
-./db/scripts/migrate.sh --env test up             # small sqlplus helper container (RUNNER=docker-client)
-./db/scripts/migrate.sh --env test status         # where is the target now?
-./db/scripts/migrate.sh --env test plan --sql     # exactly what will run - attach to the change ticket
-# backup / snapshot the target DB here (Data Pump expdp or storage snapshot)
-./db/scripts/migrate.sh --env test migrate        # MIGRATE OK
-./db/scripts/migrate.sh --env test validate       # VALIDATE OK
-./db/scripts/migrate.sh --env test smoke
+./db/scripts/migrate.sh --env prod config         # check target and "password: set"
+./db/scripts/migrate.sh --env prod up             # docker-client runner only: small sqlplus helper container
+./db/scripts/migrate.sh --env prod status         # prints "Target: USER@SERVICE ..."; aborts if it is not EXPECTED_DB
+./db/scripts/migrate.sh --env prod plan --sql     # exactly what will run, with pre-checks and destructive warnings - attach to the ticket
+# backup / snapshot the target here (Data Pump expdp, RMAN or storage snapshot)
+export CONFIRM=BANKPDB                            # protected environment: type the expected database name
+./db/scripts/migrate.sh --env prod migrate        # MIGRATE OK
+./db/scripts/migrate.sh --env prod validate       # VALIDATE OK
+./db/scripts/migrate.sh --env prod smoke
 git tag db-release-$(date +%Y%m%d) && git push --tags     # record which commit is deployed
 ```
-Windows: `db\migrate.cmd --env test plan` (same commands).
+Windows: `db\migrate.cmd --env prod plan` (same commands, `set CONFIRM=BANKPDB`).
 
-Production: same steps with `--env prod`; `prod` is listed in `PROTECTED_ENVS`, so `migrate`, `step`, `undo`, `repair` and
-`baseline` also need `CONFIRM=yes` (Windows: `set CONFIRM=yes`). Run it in the agreed window, after the same version passed test.
-The target needs network access from your machine (the helper container uses your machine's network).
+Protected environments (`PROTECTED_ENVS`, default `prod`) require `EXPECTED_DB` in the env file and `CONFIRM=<EXPECTED_DB>` for every command
+that changes the target. `CONFIRM=yes` is rejected on purpose: typing the database name is the proof that you looked at the target.
 
-First time on a database that already has the schema (no history yet): `--env test baseline <version>` - see CONFIGURATION.md section 3.
+First time on a database that already has the schema (no history yet): follow [ONBOARDING.md](ONBOARDING.md) part 3
+(`verify-baseline`, then `baseline`), never `migrate` directly.
 
 Promotion order: **local -> test -> prod**, always the same commit/tag; `status` on each shows the same history.
 
@@ -158,9 +159,12 @@ Promotion order: **local -> test -> prod**, always the same commit/tag; `status`
 
 | Symptom | Meaning | What to do |
 |---|---|---|
-| `cannot connect to ...` | container not ready, wrong host/port/service/password | `up` (wait for "ready"); `--env <name> config`; check `config/<env>.conf` and `<env>.secret.conf` |
+| `cannot connect to ...` | container not ready, wrong host/port/service/password | `up` (wait for "ready"); `--env <name> config`; check `.env` / `.env.<name>` |
 | `service "oracle" is not running` | container stopped | `migrate.sh up` |
-| `ORA-01017` | wrong user/password | fix `DB_USER` / `DB_PASSWORD` for that environment |
+| `ORA-01017` | wrong user/password | fix `DB_USER` / `DB_PASSWORD` in that env file |
+| `WRONG TARGET: connected to X but EXPECTED_DB is Y` | the env file points at the wrong database | nothing ran; fix host/service in the env file |
+| `another run holds the lock` | a run is in progress, or one crashed | wait; if it crashed and nothing is running: `unlock` |
+| `NOT applied: pre-check found problems` / `destructive statements WITHOUT an approval marker` | the migration was not started; nothing to clean | resolve the data, or add `-- destructive-approved: <reason>` after review |
 | `Vnnn FAILED` | statement error; DDL before it is committed | check with `sql`, undo partial changes by hand or with the U file, `repair`, fix file, `migrate` |
 | `is recorded as FAILED` | an earlier failure not repaired | as above |
 | `checksum mismatch` | an applied migration was edited | `git checkout -- <file>`; put the change in a new migration |

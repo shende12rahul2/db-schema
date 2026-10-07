@@ -1,0 +1,4 @@
+# target-database settings and credentials never go to git
+.env
+.env.*
+!.env.example

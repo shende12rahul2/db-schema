@@ -1,42 +1,52 @@
 #!/usr/bin/env bash
-# Schema migration runner for Oracle. Project-neutral: all names, paths and connection details come from config/.
+# Schema migration runner for Oracle. Project-neutral: connection details come from .env, layout from config/default.conf.
 #
-#   up        start what this environment needs (RUNNER=docker: local Oracle; docker-client: sqlplus helper)
-#   down      stop/remove that container (RUNNER=docker: also deletes the local database)
-#   plan      READ-ONLY: show what migrate would run, in order, and why  (plan --sql also prints the SQL)
-#   step      apply only the NEXT pending versioned migration (to verify one change at a time)
-#   migrate   apply all pending versioned migrations, then changed/missing repeatable objects
-#   status    history, pending migrations, changed repeatable objects
-#   sql "..." run an ad-hoc query for manual verification, e.g. sql "SELECT * FROM schema_version"
-#             (multi-line: pipe a script on stdin; DML is ROLLED BACK at the end, DDL is not)
-#   validate  history vs files (checksums, order, FAILED rows) + invalid/missing objects
-#   undo      revert the most recent versioned migration (needs <UNDO_DIR>/U<ver>__*.sql)
-#   repair    remove FAILED rows after you cleaned up a failed migration
-#   baseline [ver]  adopt an existing database: mark migrations up to <ver> (default: the first) as applied
-#   smoke     run the SMOKE_SQL script (if configured)
-#   deploy    migrate + validate + smoke
-#   config    print the effective configuration (password hidden)
-#   log       print the runner log (every statement and its output)
+# Read-only (safe anywhere):
+#   config            print the effective settings (password hidden)
+#   plan [--sql]      what 'migrate' would do, in order, and why; pre-checks of pending migrations
+#   status            history, pending migrations, changed repeatable objects
+#   validate          history vs files (checksums, order, FAILED rows) + invalid/missing objects
+#   verify-baseline V check an EXISTING database against baseline/V<V>.manifest (changes nothing)
+#   manifest V        print a manifest of the connected database (run on a reference DB at version V)
+#   sql "..."         ad-hoc query (DML is rolled back at the end, DDL is not; protected targets: SELECT only)
+#   log               runner log
+# Changes the target (protected environments need CONFIRM=<EXPECTED_DB>):
+#   baseline V        adopt an existing database AFTER verify-baseline passes: records V (and the verified code objects)
+#   migrate           apply pending versioned migrations, then new/changed/missing repeatable objects
+#   step              apply only the NEXT pending migration
+#   deploy            migrate + validate + smoke
+#   undo              revert the newest migration (only if an undo script exists)
+#   repair            remove FAILED rows after you cleaned up a failed migration
+#   unlock            clear a stale run lock
+# Local helpers:      up | down   (docker runners only)   smoke
 #
-# Choose the environment with --env <name> (first argument) or DB_ENV=<name>; settings: config/*.conf, docs/CONFIGURATION.md
+# Target: .env (default) | --env <name> = .env.<name> | --env-file <path>.   Docs: docs/ONBOARDING.md
 set -uo pipefail
 DB_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$DB_DIR"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-if [ "${1:-}" = "--env" ]; then [ -n "${2:-}" ] || die "--env needs a name"; export DB_ENV=$2; shift 2; fi
+while [ "${1:-}" = "--env" ] || [ "${1:-}" = "--env-file" ]; do
+  [ -n "${2:-}" ] || die "$1 needs a value"
+  if [ "$1" = "--env" ]; then export ENV_NAME=$2; else export ENV_FILE=$2; fi
+  shift 2
+done
 # shellcheck source=lib/config.sh
 . "$DB_DIR/scripts/lib/config.sh"
 
 case "$RUNNER" in docker|docker-client|local) ;; *) die "RUNNER must be docker, docker-client or local (got '$RUNNER')";; esac
 SERVICE=oracle; [ "$RUNNER" = "docker-client" ] && SERVICE=client
 
+is_protected() { case ",$PROTECTED_ENVS," in *",$APP_ENV,"*) return 0;; esac; return 1; }
+
 cmd_config() {
-  echo "environment    : $DB_ENV   (protected: $PROTECTED_ENVS)"
+  echo "env file       : $ENV_FILE   $([ "$ENV_FILE_FOUND" = 1 ] && echo '(found)' || echo '(NOT FOUND - copy .env.example to .env)')"
+  echo "app env        : $APP_ENV   protected: $(is_protected && echo yes || echo no)   (PROTECTED_ENVS=$PROTECTED_ENVS)"
   echo "runner         : $RUNNER"
-  echo "connection     : ${DB_USER}@//${DB_HOST}:${DB_PORT}/${DB_SERVICE}   password: $([ -n "$DB_PASSWORD" ] && echo set || echo EMPTY)"
-  echo "history table  : $HISTORY_TABLE"
+  echo "connection     : ${DB_USER:-?}@//${DB_HOST}:${DB_PORT}/${DB_SERVICE:-?}   password: $([ -n "$DB_PASSWORD" ] && echo set || echo EMPTY)"
+  echo "expected db    : ${EXPECTED_DB:-(not set)}"
+  echo "history table  : $HISTORY_TABLE   baseline manifests: $BASELINE_DIR/"
   echo "migrations     : $MIGRATIONS_DIR   undo: $UNDO_DIR   repeatable: $REPEATABLE_DIR"
   echo "smoke script   : ${SMOKE_SQL:-(none)}"
   echo "log            : $LOG"
@@ -60,30 +70,34 @@ if [ "$RUNNER" != "local" ] && [ -z "${MIGRATE_IN_CONTAINER:-}" ]; then
       if [ "$SERVICE" = "oracle" ]; then
         svc=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$CONTAINER_NAME" 2>/dev/null || true)
         if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1 && [ "$svc" != "$COMPOSE_PROJECT_NAME" ]; then
-          die "a container named $CONTAINER_NAME already exists outside this project. Remove it (docker rm -f $CONTAINER_NAME) or set CONTAINER_NAME in config/default.conf"
+          die "a container named $CONTAINER_NAME already exists outside this project. Remove it (docker rm -f $CONTAINER_NAME) or set CONTAINER_NAME in .env"
         fi
         echo "Starting Oracle '$CONTAINER_NAME' (first run downloads the image and creates the DB: a few minutes)..."
         "${COMPOSE[@]}" up -d --wait oracle && echo "Oracle is ready (host port $HOST_PORT)."; exit $?
       fi
-      echo "Starting sqlplus helper container for environment '$DB_ENV'..."
-      "${COMPOSE[@]}" up -d client && echo "Ready. Target database: ${DB_USER}@//${DB_HOST}:${DB_PORT}/${DB_SERVICE}"; exit $? ;;
+      echo "Starting sqlplus helper container (the database itself is not touched)..."
+      "${COMPOSE[@]}" up -d client && echo "Ready. Target: ${DB_USER:-?}@//${DB_HOST}:${DB_PORT}/${DB_SERVICE:-?}"; exit $? ;;
     down)
+      is_protected && die "refusing 'down' for protected environment '$APP_ENV'"
       if [ "$SERVICE" = "oracle" ]; then echo "Removing local Oracle '$CONTAINER_NAME' and its data..."; fi
       "${COMPOSE[@]}" rm -s -f -v "$SERVICE"; exit $? ;;
     config) cmd_config; exit 0 ;;
-    help|-h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+    help|-h|--help) sed -n '2,29p' "$0"; exit 0 ;;
   esac
   [ -n "$("${COMPOSE[@]}" ps --status running -q "$SERVICE" 2>/dev/null)" ] \
-    || die "the $SERVICE container is not running. Start it with: $0 ${DB_ENV:+--env $DB_ENV }up"
-  fwd=(-e "MIGRATE_IN_CONTAINER=1" -e "DB_ENV=$DB_ENV")
-  for k in $CONFIG_FORWARD; do [ "$k" = "DB_ENV" ] || fwd+=(-e "$k=${!k}"); done
+    || die "the $SERVICE container is not running. Start it with: $0 up"
+  fwd=(-e "MIGRATE_IN_CONTAINER=1")
+  if [ -n "${ENV_NAME:-}" ]; then fwd+=(-e "ENV_NAME=$ENV_NAME"); fi
+  case "$ENV_FILE" in "$DB_DIR"/*) [ "$ENV_FILE" = "$DB_DIR/.env" ] || [ -n "${ENV_NAME:-}" ] || fwd+=(-e "ENV_FILE=${ENV_FILE#"$DB_DIR"/}") ;;
+    *) die "--env-file must be inside $DB_DIR (only that folder is visible to the container)" ;; esac
+  for k in $CONFIG_FORWARD; do case "$k" in ENV_FILE|ENV_NAME) ;; *) fwd+=(-e "$k=${!k}");; esac; done
   exec "${COMPOSE[@]}" exec -T -w "/workspace/$(basename "$DB_DIR")" "${fwd[@]}" "$SERVICE" bash scripts/migrate.sh "$@"
 fi
 
 # ---- runner side (inside the container, or RUNNER=local): real work ----------------
 case "${1:-help}" in
   config) cmd_config; exit 0 ;;
-  help|-h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+  help|-h|--help) sed -n '2,29p' "$0"; exit 0 ;;
   up|down) echo "RUNNER=local: nothing to start or stop (using sqlplus on this machine)"; exit 0 ;;
   log) cat "$LOG" 2>/dev/null || echo "no log yet ($LOG)"; exit 0 ;;
 esac
@@ -119,17 +133,43 @@ run_script() {
   rm -f "$tmp"; return 0
 }
 
+upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
+TARGET_DESC=""
+# connect_check: connect, print WHAT we are connected to, and abort if it is not the expected database.
 connect_check() {
-  local r; r=$(q "SELECT 'OK' FROM dual;")
-  [ "$(printf '%s' "$r" | tr -d '[:space:]')" = "OK" ] && return 0
-  echo "$r" | grep -E 'ORA-|SP2-' | head -3 >&2
-  die "cannot connect to ${DB_USER}@//${DB_HOST}:${DB_PORT}/${DB_SERVICE} (environment '$DB_ENV'). Check config/$DB_ENV.conf, the password, and that the DB is up."
+  if [ "$ENV_FILE_FOUND" != 1 ] && [ -z "${CONN_FROM_ENV:-}" ] && [ -z "$DB_USER" ]; then
+    die "no target configured: copy .env.example to .env and fill it in (or use --env <name> / --env-file <path>)"
+  fi
+  local r id con usr dbn
+  r=$(q "SELECT 'OK|'||SYS_CONTEXT('USERENV','CON_NAME')||'|'||SYS_CONTEXT('USERENV','SESSION_USER')||'|'||SYS_CONTEXT('USERENV','DB_NAME') FROM dual;")
+  id=$(printf '%s\n' "$r" | grep '^OK|' | head -1)
+  if [ -z "$id" ]; then
+    echo "$r" | grep -E 'ORA-|SP2-' | head -3 >&2
+    die "cannot connect to ${DB_USER:-?}@//${DB_HOST}:${DB_PORT}/${DB_SERVICE:-?} (app env '$APP_ENV'). Check .env, the password, and that the database is up."
+  fi
+  IFS='|' read -r _ con usr dbn <<< "$id"
+  TARGET_DESC="$usr@$con (db $dbn, ${DB_HOST}:${DB_PORT}) app env '$APP_ENV'"
+  echo "Target: $TARGET_DESC"
+  if [ -n "$EXPECTED_DB" ]; then
+    if [ "$(upper "$EXPECTED_DB")" != "$(upper "$con")" ] && [ "$(upper "$EXPECTED_DB")" != "$(upper "$dbn")" ]; then
+      die "WRONG TARGET: connected to '$con' (db '$dbn') but EXPECTED_DB is '$EXPECTED_DB'. Nothing was changed. Fix .env."
+    fi
+  elif is_protected; then
+    die "protected environment '$APP_ENV' needs EXPECTED_DB in .env (the service/PDB you intend to change)."
+  fi
 }
-prod_guard() {
-  case ",$PROTECTED_ENVS," in
-    *",$DB_ENV,"*) [ "$CONFIRM" = "yes" ] || die "environment '$DB_ENV' is protected: re-run with CONFIRM=yes to $1" ;;
-  esac
+# guard <action>: for commands that change the target. Protected environments need CONFIRM=<EXPECTED_DB>.
+guard() {
+  if is_protected; then
+    [ "$(upper "$CONFIRM")" = "$(upper "$EXPECTED_DB")" ] \
+      || die "protected environment: to $1 target '$TARGET_DESC' re-run with CONFIRM=$EXPECTED_DB (you must type the expected database name)."
+  fi
 }
+
+# ---- history + lock tables ------------------------------------------------
+LOCK=${HIST}_lock
+LOCK_UP=$(upper "$LOCK")
+history_present() { [ "$(q "SELECT COUNT(*) FROM user_tables WHERE table_name='$HIST_UP';" | tr -d '[:space:]')" != "0" ]; }
 bootstrap() {
   local out
   out=$(q "DECLARE n NUMBER; BEGIN
@@ -152,14 +192,95 @@ bootstrap() {
       CONSTRAINT ck_${HIST}_status CHECK (status IN (''SUCCESS'', ''FAILED'', ''UNDONE''))
     )';
   END IF;
+  SELECT COUNT(*) INTO n FROM user_tables WHERE table_name = '$LOCK_UP';
+  IF n = 0 THEN EXECUTE IMMEDIATE '
+    CREATE TABLE $LOCK (
+      id        NUMBER PRIMARY KEY,
+      locked_by VARCHAR2(60),
+      host      VARCHAR2(200),
+      locked_at TIMESTAMP DEFAULT SYSTIMESTAMP,
+      command   VARCHAR2(60)
+    )';
+  END IF;
 END;
 /")
-  printf '%s\n' "$out" | grep -qE 'ORA-|SP2-|PLS-' && die "could not create history table $HIST: $out"
+  printf '%s\n' "$out" | grep -qE 'ORA-|SP2-|PLS-' && die "could not create the history/lock tables ($HIST): $out"
   return 0
 }
-app_tables_without_history() {   # 0 = DB has application tables but an empty history
-  [ "$(q "SELECT COUNT(*) FROM $HIST;" | tr -d '[:space:]')" = "0" ] || return 1
-  [ "$(q "SELECT COUNT(*) FROM user_tables WHERE table_name <> '$HIST_UP';" | tr -d '[:space:]')" != "0" ]
+
+# ---- run lock: one migration run per target at a time -------------------------
+LOCK_HELD=0
+release_lock() { if [ "$LOCK_HELD" = 1 ]; then q "DELETE FROM $LOCK WHERE id=1; COMMIT;" >/dev/null; LOCK_HELD=0; fi; }
+acquire_lock() { # <command name>
+  local host out who
+  host=$(uname -n 2>/dev/null | tr -cd 'A-Za-z0-9._-'); [ -n "$host" ] || host=unknown
+  out=$(q "INSERT INTO $LOCK (id, locked_by, host, command) VALUES (1, USER, '$host', '$1'); COMMIT;")
+  if printf '%s\n' "$out" | grep -q 'ORA-00001'; then
+    who=$(q "SELECT locked_by||' on '||host||' since '||TO_CHAR(locked_at,'YYYY-MM-DD HH24:MI:SS')||' ('||command||')' FROM $LOCK WHERE id=1;")
+    die "another run holds the lock: $who. Wait for it. If it crashed, check nothing is running, then: migrate.sh unlock"
+  fi
+  printf '%s\n' "$out" | grep -qE 'ORA-|SP2-' && die "could not take the run lock: $out"
+  LOCK_HELD=1
+  trap release_lock EXIT
+  trap 'exit 130' INT TERM
+}
+# begin <action>: the start of every command that changes the target.
+# Order matters: identity + confirmation first, then "is this schema ours to touch?", and only then create/lock anything.
+begin() {
+  connect_check; guard "$1"
+  case "$1" in
+    migrate|step)
+      if app_tables_without_history; then
+        die "this schema already has tables but no migration history, so it will NOT be changed. Adopt it first: migrate.sh verify-baseline <version>, then migrate.sh baseline <version> (docs/ONBOARDING.md, part 3)."
+      fi ;;
+    undo|repair)
+      history_present || die "no migration history in this schema: nothing to $1" ;;
+  esac
+  bootstrap
+  acquire_lock "$1"
+}
+
+# ---- destructive statements ----------------------------------------------------
+# destructive_hits <file>: print destructive statements (comments stripped, one line each); empty = none
+destructive_hits() {
+  sed -e 's/--.*$//' "$1" | tr '\n' ' ' | sed -e 's#/\*[^*]*\*\+\([^/*][^*]*\*\+\)*/##g' | tr ';' '\n' \
+    | awk '{ st=toupper($0); gsub(/[ \t]+/," ",st); sub(/^ /,"",st) }
+      st ~ /^DROP (TABLE|USER|SCHEMA|TABLESPACE|DATABASE|SEQUENCE) / || st ~ /^DROP (TABLE|USER|SCHEMA|TABLESPACE|DATABASE|SEQUENCE)$/ { print substr(st,1,70); next }
+      st ~ /^TRUNCATE / { print substr(st,1,70); next }
+      st ~ /^PURGE / { print substr(st,1,70); next }
+      st ~ /^ALTER TABLE [^ ]+ DROP (COLUMN|\()/ { print substr(st,1,70); next }
+      st ~ /^DELETE( FROM)? / && st !~ / WHERE / { print substr(st,1,70) }'
+}
+destructive_approved() { grep -qiE '^[[:space:]]*--[[:space:]]*destructive-approved:[[:space:]]*[^[:space:]]+' "$1"; }
+# destructive_gate <file>: 0 = fine; 1 = blocked (protected env without approval marker)
+destructive_gate() {
+  local hits; hits=$(destructive_hits "$1")
+  [ -z "$hits" ] && return 0
+  destructive_approved "$1" && { echo "   ! $1 contains destructive statements, approved in the file:"; printf '%s\n' "$hits" | sed 's/^/       /'; return 0; }
+  echo "   ! $1 contains destructive statements WITHOUT an approval marker:"; printf '%s\n' "$hits" | sed 's/^/       /'
+  echo "     Add a line  -- destructive-approved: <ticket or reason>  after review (and take a backup)."
+  is_protected && return 1
+  echo "     (not a protected environment: continuing)"; return 0
+}
+
+# ---- pre-checks: conflicts a pending migration would run into --------------------------
+# <MIGRATIONS_DIR>/checks/V<ver>.pre.sql: a SELECT returning one message per problem; no rows = fine.
+precheck() { # <ver>: prints problems, returns 1 if any
+  local f="$MIGRATIONS_DIR/checks/V$1.pre.sql" out
+  [ -f "$f" ] || return 0
+  out=$({ echo "SET HEADING OFF FEEDBACK OFF PAGESIZE 0 VERIFY OFF LINESIZE 500 TRIMSPOOL ON DEFINE OFF"; echo "@$f"; echo "EXIT"; } | sq 2>&1 | sed '/^[[:space:]]*$/d')
+  [ -z "$out" ] && return 0
+  printf '%s\n' "$out" | sed "s/^/   V$1 pre-check: /"
+  return 1
+}
+
+app_tables_without_history() {   # 0 = schema has application tables but no recorded history
+  local n
+  if history_present; then
+    [ "$(q "SELECT COUNT(*) FROM $HIST;" | tr -d '[:space:]')" = "0" ] || return 1
+  fi
+  n=$(q "SELECT COUNT(*) FROM user_tables WHERE table_name NOT IN ('$HIST_UP','$LOCK_UP') AND table_name NOT LIKE 'BIN\$%';" | tr -d '[:space:]')
+  [ "$n" != "0" ]
 }
 
 # ---- file helpers -------------------------------------------------------
@@ -178,11 +299,13 @@ obj_type_of() {
 
 # APPLIED_ROWS: "version|status|checksum" for BASELINE/VERSIONED rows
 load_applied() {
+  APPLIED_ROWS=""; history_present || return 0
   APPLIED_ROWS=$(q "SELECT version||'|'||status||'|'||NVL(checksum,'-') FROM $HIST WHERE type IN ('BASELINE','VERSIONED') ORDER BY installed_rank;")
   if printf '%s\n' "$APPLIED_ROWS" | grep -qE 'ORA-|SP2-'; then die "cannot read $HIST: $APPLIED_ROWS"; fi
 }
 # REP_ROWS: latest row per repeatable script: "script|status|checksum"
 load_repeatable() {
+  REP_ROWS=""; history_present && \
   REP_ROWS=$(q "SELECT script||'|'||status||'|'||NVL(checksum,'-') FROM (SELECT script,status,checksum,ROW_NUMBER() OVER (PARTITION BY script ORDER BY installed_rank DESC) rn FROM $HIST WHERE type='REPEATABLE') WHERE rn=1;")
   if printf '%s\n' "$REP_ROWS" | grep -qE 'ORA-|SP2-'; then die "cannot read $HIST: $REP_ROWS"; fi
   load_existing
@@ -214,7 +337,7 @@ record() { # type version_literal description script checksum ms status
 INVALID_NAMES=""
 INVALID_ALL=""
 invalid_list() {
-  q "EXEC DBMS_UTILITY.COMPILE_SCHEMA(USER, FALSE);" >/dev/null
+  [ "${NO_COMPILE:-0}" = 1 ] || q "EXEC DBMS_UTILITY.COMPILE_SCHEMA(USER, FALSE);" >/dev/null   # read-only commands set NO_COMPILE=1
   q "SELECT object_type||' '||object_name FROM user_objects WHERE status='INVALID' ORDER BY 1;"
 }
 # post_check [<invalid objects before the change>]: recompile; fail if any object is invalid that was not invalid before
@@ -264,8 +387,16 @@ validate_core() {
 }
 
 cmd_validate() {
-  connect_check; bootstrap
+  NO_COMPILE=1                      # validate never changes the target (not even a recompile)
+  connect_check
   local bad=0 s st c f r
+  if ! history_present; then
+    if app_tables_without_history; then
+      echo "x the schema has tables but no migration history: it is not managed yet (verify-baseline / baseline, docs/ONBOARDING.md part 3)"
+      echo "VALIDATE FAILED" >&2; return 1
+    fi
+    echo "i empty schema, no history yet: nothing to validate (run migrate.sh migrate)"; echo "VALIDATE OK"; return 0
+  fi
   validate_core || bad=1
   post_check || bad=1
   load_repeatable
@@ -290,6 +421,10 @@ apply_version() {
   local f=$1 ver desc sum start ms status before
   ver=$(ver_of "$f"); desc=$(desc_of "$f"); sum=$(sha_file "$f")
   echo "-> applying V$ver  $desc"
+  if ! precheck "$ver"; then
+    echo "x V$ver NOT applied: its pre-check found problems (nothing was changed). Resolve them, then run again." >&2; return 1
+  fi
+  destructive_gate "$f" || { echo "x V$ver NOT applied (nothing was changed)." >&2; return 1; }
   q "DELETE FROM $HIST WHERE version='$ver' AND status IN ('FAILED','UNDONE'); COMMIT;" >/dev/null
   before=$(invalid_list)
   start=$(date +%s)
@@ -350,14 +485,7 @@ apply_repeatable() {
 }
 
 preflight() { # common start of migrate/step
-  connect_check; prod_guard "$1"
-  # refuse BEFORE creating anything: a schema with tables but no history must be adopted with 'baseline' first
-  if [ "$(q "SELECT COUNT(*) FROM user_tables WHERE table_name='$HIST_UP';" | tr -d '[:space:]')" = "0" ] \
-     && [ "$(q "SELECT COUNT(*) FROM user_tables;" | tr -d '[:space:]')" != "0" ]; then
-    die "the database already has tables but no history in $HIST. Adopt it first: migrate.sh baseline <version>  (see docs/CONFIGURATION.md)"
-  fi
-  bootstrap
-  app_tables_without_history && die "the database already has tables but no history in $HIST. Adopt it first: migrate.sh baseline <version>  (see docs/CONFIGURATION.md)"
+  begin "$1"
   validate_core || die "validation failed - fix the problems above first"
   load_applied
 }
@@ -392,7 +520,7 @@ cmd_step() {
 
 # ---- undo / repair / baseline / status / plan / sql / smoke ------------------
 cmd_undo() {
-  connect_check; prod_guard "undo"; bootstrap
+  begin "undo"
   local ver uf
   ver=$(q "SELECT version FROM (SELECT version FROM $HIST WHERE type='VERSIONED' AND status='SUCCESS' ORDER BY installed_rank DESC) WHERE ROWNUM=1;" | tr -d '[:space:]')
   [ -z "$ver" ] && die "nothing to undo (baselined versions cannot be undone)"
@@ -415,34 +543,161 @@ cmd_undo() {
 }
 
 cmd_repair() {
-  connect_check; prod_guard "repair"; bootstrap
+  begin "repair"
   echo "FAILED rows to be removed:"
   q "SELECT '  '||NVL(version,'repeatable')||'  '||script FROM $HIST WHERE status='FAILED';"
   q "DELETE FROM $HIST WHERE status='FAILED'; COMMIT;" >/dev/null
   echo "repair done"
 }
 
-cmd_baseline() {
-  connect_check; prod_guard "baseline"; bootstrap
-  [ "$(q "SELECT COUNT(*) FROM $HIST;" | tr -d '[:space:]')" != "0" ] && die "history is not empty; baseline only works on a fresh history table"
-  local target=${1:-} f ver n=0
-  [ -z "$target" ] && { f=$(mig_files | head -1); [ -n "$f" ] || die "no migrations found in $MIGRATIONS_DIR/"; target=$(ver_of "$f"); }
-  target=${target#V}
-  [ -n "$(mig_file_for "$target")" ] || die "no migration file V${target}__*.sql in $MIGRATIONS_DIR/"
-  for f in $(mig_files); do
-    ver=$(ver_of "$f")
-    [ $((10#$ver)) -le $((10#$target)) ] || continue
-    record BASELINE "'$ver'" "$(desc_of "$f")" "$f" "$(sha_file "$f")" 0 SUCCESS
-    echo "   V$ver marked as applied (baseline, not executed)"; n=$((n + 1))
+# ---- inventory / manifest / verify-baseline / baseline ------------------------------
+# inventory: one line per table, column, sequence, code object of the connected schema (history tables excluded)
+inventory() {
+  q "SELECT 'TABLE|'||table_name FROM user_tables WHERE table_name NOT LIKE 'BIN\$%' AND table_name NOT IN ('$HIST_UP','$LOCK_UP')
+UNION ALL
+SELECT 'COLUMN|'||c.table_name||'|'||c.column_name||'|'||REGEXP_REPLACE(c.data_type,'\(.*\)','')
+  FROM user_tab_columns c JOIN user_tables t ON t.table_name = c.table_name
+ WHERE c.table_name NOT LIKE 'BIN\$%' AND c.table_name NOT IN ('$HIST_UP','$LOCK_UP')
+UNION ALL
+SELECT 'SEQUENCE|'||sequence_name FROM user_sequences
+UNION ALL
+SELECT 'OBJECT|'||object_type||'|'||object_name||'|'||status FROM user_objects
+ WHERE object_type IN ('TYPE','TYPE BODY','FUNCTION','PROCEDURE','PACKAGE','PACKAGE BODY','TRIGGER','VIEW')
+   AND object_name NOT LIKE 'SYS\_PLSQL\_%' ESCAPE '\'
+ORDER BY 1;"
+}
+
+cmd_manifest() {
+  local ver=${1:-}; [ -n "$ver" ] || die "usage: migrate.sh manifest <version>   (run it on a reference database that is at that version)"
+  ver=${ver#V}
+  connect_check >&2
+  local inv f key map="" line t n path
+  inv=$(inventory)
+  printf '%s\n' "$inv" | grep -qE '^(ORA|SP2)-' && die "cannot read the schema inventory: $inv"
+  for f in $(rep_files); do map="$map$(obj_type_of "$f")|$(obj_name "$f")|$f|$(sha_file "$f")"$'\n'; done
+  echo "# Baseline manifest for V$ver: what an existing database must contain to be adopted at this version."
+  echo "# Generated $(date -u +%Y-%m-%dT%H:%M:%SZ) from $TARGET_DESC. REVIEW before committing; regenerate on a fresh reference install."
+  echo "SCHEMA|$ver"
+  printf '%s\n' "$inv" | grep -E '^(TABLE|COLUMN|SEQUENCE)\|'
+  printf '%s\n' "$inv" | grep '^OBJECT|' | while IFS='|' read -r _ t n st; do
+    [ "$st" = "VALID" ] || { echo "# skipped $t $n: status $st" ; continue; }
+    line=$(printf '%s' "$map" | awk -F'|' -v t="$t" -v n="$n" '$1==t && $2==n {print $3 "|" $4; exit}')
+    if [ -n "$line" ]; then echo "OBJECT|$t|$n|${line%%|*}|${line#*|}"; else echo "# no repeatable file for $t $n (not required)"; fi
   done
-  echo "baselined $n migration(s) up to V$target. Next: migrate.sh plan, then migrate.sh migrate."
+}
+
+# verify_manifest <ver>: compare the database with baseline/V<ver>.manifest. Prints problems; returns the problem count (0 = matches)
+verify_manifest() {
+  local m="$BASELINE_DIR/V$1.manifest" inv out
+  [ -f "$m" ] || die "no baseline manifest $m. Only a known, documented starting state can be adopted. Create the manifest from a reference database at V$1: migrate.sh manifest $1 > $m"
+  grep -q '^TABLE|' "$m" || die "$m has no TABLE lines: not a valid manifest"
+  inv=$(inventory)
+  printf '%s\n' "$inv" | grep -qE '^(ORA|SP2)-' && die "cannot read the schema inventory: $inv"
+  out=$({ printf '%s\n' "$inv" | sed 's/^/A|/'; grep -E '^(TABLE|COLUMN|SEQUENCE|OBJECT)\|' "$m" | tr -d '\r' | sed 's/^/M|/'; } | awk -F'|' '
+    $1=="A" { if ($2=="TABLE") at[$3]=1; else if ($2=="COLUMN") ac[$3 "|" $4]=$5; else if ($2=="SEQUENCE") as[$3]=1; else if ($2=="OBJECT") ao[$3 "|" $4]=$5; next }
+    $1=="M" {
+      if ($2=="TABLE") { mt[$3]=1; if (!($3 in at)) print "missing table " $3 }
+      else if ($2=="COLUMN") { if (!($3 in at)) next; k=$3 "|" $4
+        if (!(k in ac)) print "missing column " $3 "." $4 " (" $5 ")"; else if (ac[k]!=$5) print "column " $3 "." $4 " has type " ac[k] ", expected " $5 }
+      else if ($2=="SEQUENCE") { if (!($3 in as)) print "missing sequence " $3 }
+      else if ($2=="OBJECT") { k=$3 "|" $4; if (!(k in ao)) print "missing " $3 " " $4; else if (ao[k]!="VALID") print $3 " " $4 " exists but is " ao[k] " (must compile before adoption)" }
+    }')
+  VERIFY_PROBLEMS=$out
+  if [ -n "$out" ]; then printf '%s\n' "$out" | sed 's/^/   x /'; printf '%s\n' "$out" | wc -l | tr -d '[:space:]'; else echo 0; fi
+}
+
+require_manifest() { # <ver>
+  local m="$BASELINE_DIR/V$1.manifest"
+  [ -f "$m" ] || die "no baseline manifest $m. Only a known, documented starting state can be adopted. Create it from a reference database at V$1: migrate.sh manifest $1 > $m"
+  grep -q '^TABLE|' "$m" || die "$m has no TABLE lines: not a valid manifest"
+}
+
+cmd_verify_baseline() {
+  local ver=${1:-}; [ -n "$ver" ] || die "usage: migrate.sh verify-baseline <version>"
+  ver=${ver#V}
+  [ -n "$(mig_file_for "$ver")" ] || die "no migration V${ver}__*.sql in $MIGRATIONS_DIR/"
+  require_manifest "$ver"
+  connect_check
+  local out n bad=0 f v
+  echo "Checking the database against $BASELINE_DIR/V$ver.manifest ..."
+  out=$(verify_manifest "$ver"); n=$(printf '%s\n' "$out" | tail -1)
+  printf '%s\n' "$out" | sed '$d'
+  [ "$n" = "0" ] || bad=1
+  if history_present && [ "$(q "SELECT COUNT(*) FROM $HIST;" | tr -d '[:space:]')" != "0" ]; then
+    echo "i this schema already has migration history: it is managed. (baseline is only for schemas without history)"
+  else
+    echo "Pre-checks of the migrations that would be applied after V$ver:"
+    local any=0
+    for f in $(mig_files); do
+      v=$(ver_of "$f"); [ $((10#$v)) -gt $((10#$ver)) ] || continue
+      any=1
+      if precheck "$v"; then echo "   V$v ok"; else bad=1; fi
+    done
+    [ $any -eq 0 ] && echo "   (no later migrations)"
+  fi
+  if [ $bad -eq 0 ]; then echo "READY: the database matches V$ver and the pending migrations have no conflicts. Next: migrate.sh baseline $ver"
+  else echo "NOT READY: resolve the items above (fix the database or the plan), then run verify-baseline again. Nothing was changed." >&2; return 1; fi
+}
+
+cmd_baseline() {
+  local ver=${1:-}; [ -n "$ver" ] || die "usage: migrate.sh baseline <version>   (run verify-baseline first)"
+  ver=${ver#V}
+  [ -n "$(mig_file_for "$ver")" ] || die "no migration V${ver}__*.sql in $MIGRATIONS_DIR/"
+  require_manifest "$ver"
+  connect_check; guard "baseline"
+  if history_present && [ "$(q "SELECT COUNT(*) FROM $HIST;" | tr -d '[:space:]')" != "0" ]; then
+    die "this schema already has migration history. Baseline is a one-time step for schemas without history."
+  fi
+  echo "Verifying before recording anything ..."
+  local out n; out=$(verify_manifest "$ver"); n=$(printf '%s\n' "$out" | tail -1)
+  printf '%s\n' "$out" | sed '$d'
+  [ "$n" = "0" ] || die "baseline REFUSED: the database does not match V$ver ($n problem(s) above). Nothing was changed."
+  local f v pc=0
+  for f in $(mig_files); do
+    v=$(ver_of "$f"); [ $((10#$v)) -gt $((10#$ver)) ] || continue
+    precheck "$v" || pc=1
+  done
+  [ $pc -eq 0 ] || die "baseline REFUSED: pre-checks of the pending migrations found problems (above). Nothing was changed."
+  bootstrap; acquire_lock "baseline"
+  local sql="" t name path sum nv=0 nr=0 desc
+  for f in $(mig_files); do
+    v=$(ver_of "$f"); [ $((10#$v)) -le $((10#$ver)) ] || continue
+    desc=$(desc_of "$f")
+    sql="$sql INSERT INTO $HIST (type,version,description,script,checksum,execution_ms,status) VALUES ('BASELINE','$v','$desc','$f','$(sha_file "$f")',0,'SUCCESS');"$'\n'
+    nv=$((nv + 1))
+  done
+  # code objects the manifest verified as present: recorded as already deployed (NOT executed again)
+  while IFS='|' read -r _ t name path sum; do
+    [ -n "$path" ] && [ "$path" != "-" ] || continue
+    sql="$sql INSERT INTO $HIST (type,version,description,script,checksum,execution_ms,status) VALUES ('REPEATABLE',NULL,'baseline: already deployed','$path','$sum',0,'SUCCESS');"$'\n'
+    nr=$((nr + 1))
+  done < <(grep '^OBJECT|' "$BASELINE_DIR/V$ver.manifest" | tr -d '\r')
+  out=$(q "$sql
+COMMIT;")
+  printf '%s\n' "$out" | grep -qE 'ORA-|SP2-' && die "could not record the baseline: $out"
+  echo "BASELINE recorded: $nv migration(s) up to V$ver and $nr verified code object(s) marked as already deployed. Nothing was executed against your data."
+  echo "Next: migrate.sh plan   (only later versions and new/changed code files are pending)"
+}
+
+cmd_unlock() {
+  connect_check; guard "unlock"
+  history_present || die "no history table: nothing to unlock"
+  local who; who=$(q "SELECT locked_by||' on '||host||' since '||TO_CHAR(locked_at,'YYYY-MM-DD HH24:MI:SS')||' ('||command||')' FROM $LOCK WHERE id=1;" 2>/dev/null | grep -v 'ORA-')
+  [ -n "$who" ] || { echo "no lock is held"; return 0; }
+  echo "removing lock held by: $who"
+  q "DELETE FROM $LOCK WHERE id=1; COMMIT;" >/dev/null
+  echo "unlocked"
 }
 
 cmd_status() {
-  connect_check; bootstrap
-  echo "Environment: $DB_ENV   Target: ${DB_USER}@//${DB_HOST}:${DB_PORT}/${DB_SERVICE}"
-  echo "Applied history (versioned):"
-  q "SELECT RPAD(installed_rank,4)||RPAD(NVL(version,'-'),6)||RPAD(type,11)||RPAD(status,9)||RPAD(TO_CHAR(installed_on,'YYYY-MM-DD HH24:MI'),18)||description FROM $HIST WHERE type<>'REPEATABLE' ORDER BY installed_rank;"
+  connect_check
+  if history_present; then
+    echo "Applied history (versioned):"
+    q "SELECT RPAD(installed_rank,4)||RPAD(NVL(version,'-'),6)||RPAD(type,11)||RPAD(status,9)||RPAD(TO_CHAR(installed_on,'YYYY-MM-DD HH24:MI'),18)||description FROM $HIST WHERE type<>'REPEATABLE' ORDER BY installed_rank;"
+  else
+    echo "No migration history in this schema yet."
+    app_tables_without_history && echo "The schema has tables: adopt it with verify-baseline / baseline before migrating."
+  fi
   load_applied; load_repeatable
   echo "Pending versioned migrations:"
   local f ver any=0
@@ -462,11 +717,11 @@ cmd_plan() {
   connect_check
   local show_sql=0 f ver n=0 cur r
   [ "${1:-}" = "--sql" ] && show_sql=1
-  echo "Target   : ${DB_USER}@//${DB_HOST}:${DB_PORT}/${DB_SERVICE}   DB_ENV=$DB_ENV"
   if [ "$(q "SELECT COUNT(*) FROM user_tables WHERE table_name='$HIST_UP';" | tr -d '[:space:]')" = "0" ]; then
     APPLIED_ROWS=""; REP_ROWS=""; load_existing
     if [ "$(q "SELECT COUNT(*) FROM user_tables;" | tr -d '[:space:]')" != "0" ]; then
-      echo "History  : none, but the schema already has tables -> run 'baseline <version>' first (migrate will refuse)"
+      echo "History  : none, but the schema already has tables -> NOT managed yet: migrate will refuse."
+      echo "           Adopt it: migrate.sh verify-baseline <version>, then migrate.sh baseline <version> (docs/ONBOARDING.md part 3)"
     else
       echo "History  : none yet (empty schema) - $HIST will be created by migrate"
     fi
@@ -474,7 +729,7 @@ cmd_plan() {
     load_applied; load_repeatable
     cur=$(q "SELECT MAX(TO_NUMBER(version)) FROM $HIST WHERE type IN ('BASELINE','VERSIONED') AND status='SUCCESS';" | tr -d '[:space:]')
     echo "Current  : V${cur:-none}"
-    app_tables_without_history && echo "History  : empty, but the schema already has tables -> run 'baseline <version>' first (migrate will refuse)"
+    app_tables_without_history && echo "History  : empty, but the schema already has tables -> adopt it with verify-baseline / baseline first (migrate will refuse)"
     echo "Checks   :"; if validate_core | sed 's/^/  /'; then echo "  history OK"; else echo "  -> migrate will REFUSE to run until these are fixed"; fi
   fi
   echo
@@ -486,6 +741,20 @@ cmd_plan() {
     if [ $show_sql -eq 1 ]; then sed 's/^/        | /' "$f"; fi
   done
   [ $n -eq 0 ] && echo "   (none)"
+  if [ $n -gt 0 ]; then
+    echo "   Safety checks on the pending migrations:"
+    local pc=0 managed=0
+    history_present && [ "$(q "SELECT COUNT(*) FROM $HIST;" | tr -d '[:space:]')" != "0" ] && managed=1
+    for f in $(mig_files); do
+      ver=$(ver_of "$f"); [ "$(row_field "$ver" 2)" = "SUCCESS" ] && continue
+      if [ $managed -eq 1 ]; then precheck "$ver" || pc=1; fi
+      local dh; dh=$(destructive_hits "$f")
+      if [ -n "$dh" ]; then
+        if destructive_approved "$f"; then echo "   V$ver destructive statements (approved in file)"; else echo "   V$ver destructive statements WITHOUT approval marker - blocked on protected environments"; pc=1; fi
+      fi
+    done
+    [ $pc -eq 0 ] && echo "   no conflicts found$([ $managed -eq 0 ] && echo ' (pre-checks run once the schema has history)')"
+  fi
   echo
   echo "2) Repeatable files, run after the migrations:"
   n=0
@@ -503,6 +772,12 @@ cmd_sql() {
   connect_check
   local stmt=${1:-}
   [ -z "$stmt" ] && stmt=$(cat)
+  if is_protected; then
+    case "$(printf '%s' "$stmt" | tr '[:lower:]' '[:upper:]' | sed -e 's/^[[:space:]]*//')" in
+      SELECT*|WITH*|"DESC "*|DESCRIBE*) ;;
+      *) guard "run this non-SELECT statement" ;;
+    esac
+  fi
   case "$stmt" in *";"|*"/") ;; *) stmt="$stmt;";; esac
   { echo "SET LINESIZE 220 PAGESIZE 200 FEEDBACK ON TRIMOUT ON DEFINE OFF"; echo "COLUMN script FORMAT A60"; echo "COLUMN description FORMAT A40"; echo "COLUMN checksum FORMAT A12 TRUNCATED"; echo "$stmt"; echo "EXIT ROLLBACK"; } | sq
 }
@@ -510,7 +785,8 @@ cmd_sql() {
 cmd_smoke() {
   if [ -z "$SMOKE_SQL" ] || [ "$SMOKE_SQL" = "none" ]; then echo "no SMOKE_SQL configured - skipping smoke tests"; return 0; fi
   [ -f "$SMOKE_SQL" ] || die "SMOKE_SQL=$SMOKE_SQL not found"
-  connect_check; run_script "$SMOKE_SQL"
+  connect_check; guard "run the smoke tests"
+  run_script "$SMOKE_SQL"
 }
 
 case "${1:-help}" in
@@ -523,7 +799,10 @@ case "${1:-help}" in
   undo)     cmd_undo ;;
   repair)   cmd_repair ;;
   baseline) cmd_baseline "${2:-}" ;;
+  verify-baseline) cmd_verify_baseline "${2:-}" ;;
+  manifest) cmd_manifest "${2:-}" ;;
+  unlock)   cmd_unlock ;;
   smoke)    cmd_smoke ;;
   deploy)   cmd_migrate && cmd_validate && cmd_smoke && echo "DEPLOY OK" ;;
-  *) sed -n '2,23p' "$0" ;;
+  *) sed -n '2,29p' "$0" ;;
 esac

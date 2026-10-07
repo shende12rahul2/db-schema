@@ -5,37 +5,103 @@ on:
     branches: [main]
 
 jobs:
-  lint:
+  checks:
+    # no database: static rules + the runner's decision logic against a test double of sqlplus
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - name: Lint (naming, undo pairs, repeatable rules)
+      - name: Lint (naming, destructive-approval, manifests, repeatable rules)
         run: ./db/scripts/lint_migrations.sh
       - name: Merged migrations and baseline must not be edited
         if: github.event_name == 'pull_request'
         run: BASE_REF=origin/${{ github.base_ref }} ./db/scripts/lint_migrations.sh
+      - name: Config parser tests
+        run: ./db/scripts/tests/test_config.sh
+      - name: Runner behaviour tests (fresh, existing client, unknown DB, repeat, failure, wrong target, protected, lock, destructive)
+        run: ./db/scripts/tests/test_runner.sh
 
-  migrate:
+  oracle:
+    # real Oracle: proves the SQL, the manifest and the adoption path
     runs-on: ubuntu-latest
-    needs: lint
+    needs: checks
     steps:
       - uses: actions/checkout@v4
-      - name: Start Oracle (same compose file developers use)
-        run: ./db/scripts/migrate.sh up
-      - name: Plan (what a fresh install runs)
-        run: ./db/scripts/migrate.sh plan
-      - name: Fresh install - migrate, validate, smoke tests
-        run: ./db/scripts/migrate.sh deploy
-      - name: Nothing left to apply
-        run: ./db/scripts/migrate.sh plan
-      - name: Undo/redo round trip of the newest migration
+
+      - name: Start Oracle (bundled container, same compose file developers use)
         run: |
-          if ! ls db/migrations/V*.sql >/dev/null 2>&1; then echo "no migrations yet - skipping"; exit 0; fi
+          printf 'RUNNER=docker\nAPP_ENV=ci\nDB_SERVICE=FREEPDB1\nEXPECTED_DB=FREEPDB1\nAPP_USER=bank\nAPP_USER_PASSWORD=Bank123\n' > db/.env
+          ./db/scripts/migrate.sh up
+
+      - name: "1. Fresh install of an empty schema"
+        run: |
+          ./db/scripts/migrate.sh plan
+          ./db/scripts/migrate.sh deploy
+          ./db/scripts/migrate.sh plan | tee plan.txt
+          grep -c "(none)" plan.txt | grep -qx 2     # nothing left in either section
+
+      - name: "2. Repeat run applies nothing"
+        run: |
+          ./db/scripts/migrate.sh migrate | tee repeat.txt
+          grep -q "no pending versioned migrations" repeat.txt
+          grep -q "repeatable objects up to date" repeat.txt
+
+      - name: "3. The V001 manifest matches a real fresh install"
+        run: ./db/scripts/migrate.sh verify-baseline 001
+
+      - name: "4. Failure recovery: a failing migration is recorded, blocks, and can be repaired"
+        run: |
+          printf 'CREATE TABLE ci_probe (id NUMBER);\nTHIS IS NOT SQL;\n' > db/migrations/V099__ci_failure_probe.sql
+          if ./db/scripts/migrate.sh migrate; then echo "a failing migration must fail the run"; exit 1; fi
+          if ./db/scripts/migrate.sh migrate; then echo "a recorded FAILURE must block further runs"; exit 1; fi
+          ./db/scripts/migrate.sh sql "DROP TABLE ci_probe PURGE"          # clean up the partial change (DDL auto-commit)
+          ./db/scripts/migrate.sh repair
+          rm db/migrations/V099__ci_failure_probe.sql
+          ./db/scripts/migrate.sh validate
+
+      - name: "5. Existing client database: verify, baseline once, migrate only what is pending"
+        run: |
+          S=(docker exec -i bank-oracle)
+          mkuser() { "${S[@]}" sqlplus -s system/Oracle123@//localhost:1521/FREEPDB1 @/workspace/db/scripts/admin/create_schema_user.sql "$1" "$2" USERS; }
+          envfile() { printf 'RUNNER=docker\nAPP_ENV=ci-%s\nDB_SERVICE=FREEPDB1\nEXPECTED_DB=FREEPDB1\nDB_USER=%s\nDB_PASSWORD=%s\n' "$1" "$1" "$2" > "db/.env.$1"; }
+          mkuser client1 Client1Pass; envfile client1 Client1Pass
+          ./db/scripts/tests/install_legacy.sh --env client1                     # the flat legacy files, no migration tool
+          M="./db/scripts/migrate.sh --env client1"
+          $M plan | tee plan1.txt; grep -q "NOT managed yet" plan1.txt
+          if $M migrate; then echo "migrate must refuse an unmanaged schema"; exit 1; fi
+          $M verify-baseline 001
+          $M baseline 001
+          $M plan | tee plan2.txt
+          grep -q "V002" plan2.txt; ! grep -q "V001  migrations" plan2.txt
+          $M migrate
+          $M validate
+          $M migrate | tee again.txt; grep -q "no pending versioned migrations" again.txt
+          $M sql "SELECT COUNT(*) AS invalid_objects FROM user_objects WHERE status='INVALID'" | tee inv.txt; grep -qE "^ *0$" inv.txt
+
+      - name: "6. Unknown / incompatible database must be refused"
+        run: |
+          S=(docker exec -i bank-oracle)
+          "${S[@]}" sqlplus -s system/Oracle123@//localhost:1521/FREEPDB1 @/workspace/db/scripts/admin/create_schema_user.sql client2 Client2Pass USERS
+          printf 'RUNNER=docker\nAPP_ENV=ci-client2\nDB_SERVICE=FREEPDB1\nEXPECTED_DB=FREEPDB1\nDB_USER=client2\nDB_PASSWORD=Client2Pass\n' > db/.env.client2
+          ./db/scripts/tests/install_legacy.sh --env client2 --only-table accounts      # only one table: not the known structure
+          M="./db/scripts/migrate.sh --env client2"
+          if $M verify-baseline 001; then echo "verify-baseline must fail"; exit 1; fi
+          if $M baseline 001; then echo "baseline must be refused"; exit 1; fi
+          if $M migrate; then echo "migrate must be refused"; exit 1; fi
+          $M sql "SELECT COUNT(*) AS history_tables FROM user_tables WHERE table_name LIKE 'SCHEMA_VERSION%'" | grep -qE "^ *0$"   # nothing was created
+
+      - name: "7. Wrong target is refused before anything runs"
+        run: |
+          printf 'RUNNER=docker\nAPP_ENV=ci-wrong\nDB_SERVICE=FREEPDB1\nEXPECTED_DB=SOMETHING_ELSE\nDB_USER=bank\nDB_PASSWORD=Bank123\n' > db/.env.wrong
+          if ./db/scripts/migrate.sh --env wrong migrate; then echo "must abort on identity mismatch"; exit 1; fi
+
+      - name: "8. Undo/redo of the newest migration (when it has an undo script)"
+        run: |
           ./db/scripts/migrate.sh undo
           ./db/scripts/migrate.sh migrate
           ./db/scripts/migrate.sh validate
-      - name: Collect log
+
+      - name: Runner log
         if: always()
         run: ./db/scripts/migrate.sh log > migrate.log || true
       - uses: actions/upload-artifact@v4

@@ -19,15 +19,34 @@ for f in "$MIGRATIONS_DIR"/V*.sql; do
   case " $seen " in *" $v "*) err "duplicate version number $v ($b)";; esac
   seen="$seen $v"
   undo=("$UNDO_DIR"/U"${BASH_REMATCH[1]}"__*.sql)
-  [ ${#undo[@]} -gt 0 ] || err "missing undo script for $b (expected $UNDO_DIR/U${BASH_REMATCH[1]}__*.sql)"
+  [ ${#undo[@]} -gt 0 ] || echo "! $b has no undo script (optional: not every change can be reverted; plan a forward fix and a backup)"
   [ -s "$f" ] || err "$b is empty"
-  grep -qiE '^[[:space:]]*(DROP[[:space:]]+TABLE|TRUNCATE)' "$f" && echo "! $b contains DROP TABLE/TRUNCATE - make sure a backup/undo plan exists"
+  hits=$(sed -e 's/--.*$//' "$f" | tr '\n' ' ' | tr ';' '\n' | awk '{ st=toupper($0); gsub(/[ \t]+/," ",st); sub(/^ /,"",st) }
+      st ~ /^DROP (TABLE|USER|SCHEMA|TABLESPACE|DATABASE|SEQUENCE)( |$)/ || st ~ /^TRUNCATE / || st ~ /^PURGE / || st ~ /^ALTER TABLE [^ ]+ DROP (COLUMN|\()/ || (st ~ /^DELETE( FROM)? / && st !~ / WHERE /) { print substr(st,1,60) }')
+  if [ -n "$hits" ] && ! grep -qiE '^[[:space:]]*--[[:space:]]*destructive-approved:[[:space:]]*[^[:space:]]+' "$f"; then
+    err "$b has destructive statement(s) without a reviewer approval line '-- destructive-approved: <ticket or reason>': $(echo "$hits" | head -2 | tr '\n' ';')"
+  fi
 done
 for u in "$UNDO_DIR"/U*.sql; do
   b=$(basename "$u")
   [[ "$b" =~ ^U([0-9]{3,})__ ]] || { err "bad undo name: $b"; continue; }
   m=("$MIGRATIONS_DIR"/V"${BASH_REMATCH[1]}"__*.sql)
   [ ${#m[@]} -gt 0 ] || err "undo without migration: $b"
+done
+for c in "$MIGRATIONS_DIR"/checks/*; do
+  b=$(basename "$c")
+  [[ "$b" =~ ^V([0-9]{3,})\.pre\.sql$ ]] || { err "bad pre-check name: checks/$b (expected V<NNN>.pre.sql)"; continue; }
+  m=("$MIGRATIONS_DIR"/V"${BASH_REMATCH[1]}"__*.sql)
+  [ ${#m[@]} -gt 0 ] || err "pre-check without migration: checks/$b"
+done
+for m in "$BASELINE_DIR"/V*.manifest; do
+  b=$(basename "$m")
+  [[ "$b" =~ ^V([0-9]{3,})\.manifest$ ]] || { err "bad manifest name: $BASELINE_DIR/$b (expected V<NNN>.manifest)"; continue; }
+  mm=("$MIGRATIONS_DIR"/V"${BASH_REMATCH[1]}"__*.sql)
+  [ ${#mm[@]} -gt 0 ] || err "manifest for a version with no migration: $b"
+  grep -q '^TABLE|' "$m" || err "$b has no TABLE lines"
+  grep -q "^SCHEMA|${BASH_REMATCH[1]}\$" "$m" || err "$b: first data line must be SCHEMA|${BASH_REMATCH[1]}"
+  # code objects listed in a manifest may be deleted later (a migration drops them): that is legitimate, manifests are history
 done
 prev=0
 for v in $(echo $seen | tr ' ' '\n' | sort -n); do

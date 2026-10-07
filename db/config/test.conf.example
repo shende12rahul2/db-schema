@@ -1,6 +1,0 @@
-# Shared test database. Copy to config/test.conf; password goes to config/test.secret.conf (git-ignored).
-RUNNER=docker-client
-DB_HOST=test-db.example.local
-DB_PORT=1521
-DB_SERVICE=BANKPDB
-DB_USER=bank

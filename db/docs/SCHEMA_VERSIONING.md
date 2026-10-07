@@ -73,9 +73,12 @@ Daily workflow:
 | `validate` | Verify DB history against files; exit code 1 on any problem |
 | `undo` | Revert the **most recent** versioned migration via its `U` file |
 | `repair` | Delete `FAILED` rows after you cleaned up a failed migration |
-| `baseline [ver]` | Adopt an existing database: mark migrations up to `ver` (default V001) as applied |
+| `verify-baseline V` | Read-only: does an existing database match `baseline/V<V>.manifest`, and are the pending migrations free of conflicts? |
+| `baseline V` | Adopt an existing database **after** verification passes (history must be empty); executes nothing |
+| `manifest V` | Print a manifest of the connected (reference) database |
+| `unlock` | Clear the run lock left by a crashed run |
 
-Environment: `--env <name>` selects `config/<name>.conf` (see [CONFIGURATION.md](CONFIGURATION.md)); protected environments (`prod`) need `CONFIRM=yes`; `OUT_OF_ORDER=1`.
+Target: `.env`, or `--env <name>` = `.env.<name>` (see [CONFIGURATION.md](CONFIGURATION.md)); protected environments (`prod`) need `CONFIRM=<EXPECTED_DB>`; `OUT_OF_ORDER=1` allows an out-of-order version.
 
 ## 5. Handling errors: key facts
 
@@ -185,7 +188,7 @@ Fix on the branch that merged second, **before it is applied anywhere**: rename 
 V004 created `customer_preferences` and caused a production problem, but V005 (the index) was applied after it.
 Undo works newest-first, so run `undo` once per migration:
 ```bash
-export CONFIRM=yes
+export CONFIRM=BANKPDB           # protected environment: the expected database name
 ./db/scripts/migrate.sh --env prod undo      # reverts V005 (newest)
 ./db/scripts/migrate.sh --env prod undo      # reverts V004
 git checkout <previous-release-tag>          # older code objects
@@ -211,21 +214,21 @@ ALTER TABLE customers DROP COLUMN mobile;
 ```
 Undo for V007 can only re-add the empty column - take a backup before contracting.
 
-### H. Adopt a database that already has the legacy objects
+### H. Adopt a database that already has the legacy objects (verified, once)
 
-The schema was built with the legacy flat files (`main`'s `scripts/deploy.sh`): tables and code exist, no history table.
+The client schema was built with the flat legacy files: tables, code and business data exist, there is no history table.
 ```
-$ ./db/scripts/migrate.sh --env legacy-local plan
-History  : none, but the schema already has tables -> run 'baseline <version>' first (migrate will refuse)
-$ ./db/scripts/migrate.sh --env legacy-local migrate
-ERROR: the database already has tables but no history in schema_version. Adopt it first: migrate.sh baseline <version>
-$ ./db/scripts/migrate.sh --env legacy-local baseline          # legacy content = V001
-   V001 marked as applied (baseline, not executed)
-$ ./db/scripts/migrate.sh --env legacy-local migrate           # V002..V006, then every repeatable file once
-$ ./db/scripts/migrate.sh --env legacy-local validate          # VALIDATE OK
+$ ./db/scripts/migrate.sh --env client1 migrate
+ERROR: this schema already has tables but no migration history, so it will NOT be changed. Adopt it first: ...
+$ ./db/scripts/migrate.sh --env client1 verify-baseline 001          # read-only
+READY: the database matches V001 and the pending migrations have no conflicts. Next: migrate.sh baseline 001
+$ CONFIRM=CLIENT1PDB ./db/scripts/migrate.sh --env client1 baseline 001
+BASELINE recorded: 1 migration(s) up to V001 and 77 verified code object(s) marked as already deployed. Nothing was executed ...
+$ CONFIRM=CLIENT1PDB ./db/scripts/migrate.sh --env client1 migrate   # V002.. + only new/changed code files
 ```
-V006 drops the 8 empty type bodies the legacy deployment left INVALID. `legacy-local` = the old `docker run` container;
-for any other database use your own environment file (CONFIGURATION.md section 3).
+If the client differs (`x missing column CUSTOMERS.PAN_NUMBER`, `x column ACCOUNTS.BALANCE has type VARCHAR2, expected NUMBER`,
+`x PACKAGE BODY ... exists but is INVALID`), `verify-baseline` stops and `baseline` is refused. Full walk-through:
+[ONBOARDING.md](ONBOARDING.md) part 3. V006 drops the 8 empty type bodies a legacy deployment leaves INVALID.
 
 ### I. A migration breaks a view or package (invalid objects)
 
@@ -259,7 +262,7 @@ the row is `FAILED`, and you fix the file and run `migrate` again (`CREATE OR RE
 
 1. `lint_migrations.sh` green, CI green on a fresh database.
 2. Backup/snapshot taken (production).
-3. `CONFIRM=yes ./db/scripts/migrate.sh --env prod migrate`.
+3. `CONFIRM=BANKPDB ./db/scripts/migrate.sh --env prod migrate`.
 4. `./db/scripts/migrate.sh validate` and `db/scripts/validate.sql` smoke tests.
 5. Tag the release in git (the tag + `schema_version` together describe the deployed state).
 

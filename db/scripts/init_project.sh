@@ -22,54 +22,36 @@ DEST="$TARGET/$FOLDER"
 LNAME=$(echo "$NAME" | tr '[:upper:]' '[:lower:]')
 
 echo "Creating $DEST for project '$LNAME'"
-mkdir -p "$DEST"/{scripts/lib,config,docs,migrations/undo}
+mkdir -p "$DEST"/{scripts/lib,scripts/admin,scripts/tests,config,docs,baseline,migrations/undo,migrations/checks}
 for d in 01_types 02_type_bodies 03_functions 04_procedures 05_package_specs 06_package_bodies 07_triggers 08_views; do
   mkdir -p "$DEST/repeatable/$d"; : > "$DEST/repeatable/$d/.gitkeep"
 done
-: > "$DEST/migrations/undo/.gitkeep"
+: > "$DEST/migrations/undo/.gitkeep"; : > "$DEST/migrations/checks/.gitkeep"; : > "$DEST/baseline/.gitkeep"
 
 # ---- tooling (identical copies; update later by copying these files again) ----
 cp "$SRC_DB/scripts/migrate.sh" "$SRC_DB/scripts/lint_migrations.sh" "$SRC_DB/scripts/new_migration.sh" \
    "$SRC_DB/scripts/deploy.sh" "$SRC_DB/scripts/init_project.sh" "$DEST/scripts/"
 cp "$SRC_DB/scripts/lib/config.sh" "$DEST/scripts/lib/"
+cp "$SRC_DB/scripts/admin/create_schema_user.sql" "$DEST/scripts/admin/"
+cp "$SRC_DB/scripts/tests/test_config.sh" "$DEST/scripts/tests/"
 cp "$SRC_DB/docker-compose.yml" "$SRC_DB/migrate.cmd" "$DEST/"
-cp "$SRC_DB/docs/CONFIGURATION.md" "$SRC_DB/docs/RUNBOOK.md" "$DEST/docs/"
-chmod +x "$DEST"/scripts/*.sh
+cp "$SRC_DB/docs/ONBOARDING.md" "$SRC_DB/docs/CONFIGURATION.md" "$SRC_DB/docs/RUNBOOK.md" "$DEST/docs/"
+chmod +x "$DEST"/scripts/*.sh "$DEST"/scripts/tests/*.sh
 
-# ---- config ----
+# ---- config: layout (committed) and target template (.env.example) ----
 cat > "$DEST/config/default.conf" <<EOF
-# Project-wide settings (committed). Plain KEY=VALUE, no quotes, no spaces around '='. See docs/CONFIGURATION.md
+# Project layout (committed, no secrets). Connection details are NOT here: they live in .env (see .env.example).
 PROJECT_NAME=$LNAME
-DB_ENV=local
 
-# ---- files ----
 HISTORY_TABLE=schema_version
 MIGRATIONS_DIR=migrations
 UNDO_DIR=migrations/undo
 REPEATABLE_DIR=repeatable
+BASELINE_DIR=baseline
 SMOKE_SQL=scripts/smoke.sql
-
-# Environments that need CONFIRM=yes for migrate/step/undo/repair/baseline (comma separated)
-PROTECTED_ENVS=prod
-
-# ---- bundled local Oracle container (RUNNER=docker) ----
-# Running several projects at the same time? Give each a different HOST_PORT (1521, 1522, ...).
-ORACLE_IMAGE=gvenzl/oracle-free:slim
-CONTAINER_NAME=${LNAME}-oracle
-HOST_PORT=1521
-ORACLE_PASSWORD=Oracle123
-APP_USER=$LNAME
-APP_USER_PASSWORD=${LNAME}_Dev123
 EOF
-cat > "$DEST/config/local.conf" <<'EOF'
-# Local development: throw-away Oracle in Docker, created by 'migrate.sh up'.
-RUNNER=docker
-DB_SERVICE=FREEPDB1
-EOF
-for f in dev.conf.example test.conf.example prod.conf.example secret.conf.example .gitignore; do
-  sed -e "s/^DB_USER=.*/DB_USER=$LNAME/" -e "s/^DB_SERVICE=BANKPDB$/DB_SERVICE=$(echo "$LNAME" | tr '[:lower:]' '[:upper:]')PDB/" \
-    "$SRC_DB/config/$f" > "$DEST/config/$f"
-done
+sed -e "s/^DB_USER=.*/DB_USER=                    # schema owner = one per developer \/ client (e.g. ${LNAME}_alice)/" "$SRC_DB/.env.example" > "$DEST/.env.example"
+cp "$SRC_DB/.gitignore" "$DEST/.gitignore"
 
 # ---- generic smoke test ----
 cat > "$DEST/scripts/smoke.sql" <<'EOF'
@@ -99,33 +81,37 @@ EOF
 cat > "$DEST/README.md" <<EOF
 # $LNAME database schema
 
-Versioned Oracle schema. Only Docker is required (Windows, macOS, Linux).
+Versioned Oracle schema. Connection details live in \`.env\` (git-ignored); the layout in \`config/default.conf\`.
 
 \`\`\`
 $FOLDER/
-  config/          default.conf (project), local.conf, <env>.conf, <env>.secret.conf (git-ignored)
-  migrations/      V<NNN>__name.sql run once, in order  + undo/U<NNN>__name.sql
-  repeatable/      01_types .. 08_views: CREATE OR REPLACE objects, re-applied when changed
-  scripts/         migrate.sh, lint_migrations.sh, new_migration.sh, smoke.sql
+  .env.example     copy to .env and fill in: which database, which schema user, which environment
+  config/          default.conf (project layout, committed)
+  baseline/        V<NNN>.manifest: what an EXISTING database must contain to be adopted at that version
+  migrations/      V<NNN>__name.sql run once, in order; checks/V<NNN>.pre.sql conflict checks; undo/ optional
+  repeatable/      01_types .. 08_views: CREATE OR REPLACE objects, re-applied when their file changes
+  scripts/         migrate.sh, lint_migrations.sh, new_migration.sh, admin/create_schema_user.sql, smoke.sql
   migrate.cmd      Windows launcher
 \`\`\`
 
-## Start
+## New environment or new developer
+
+1. A DBA creates an empty schema user: \`scripts/admin/create_schema_user.sql\` (see docs/ONBOARDING.md part 1).
+2. \`cp $FOLDER/.env.example $FOLDER/.env\` and fill it in.
+3. \`./$FOLDER/scripts/migrate.sh config\` then \`plan\` then \`deploy\`.
+
+## First migration of this project
 
 \`\`\`bash
-./$FOLDER/scripts/migrate.sh config                  # effective settings
-./$FOLDER/scripts/migrate.sh up                      # local Oracle in Docker (first time: a few minutes)
-./$FOLDER/scripts/new_migration.sh "create first table"
-#   edit $FOLDER/migrations/V001__create_first_table.sql and $FOLDER/migrations/undo/U001__create_first_table.sql
+./$FOLDER/scripts/new_migration.sh "create first table"      # creates V001 (+ optional undo)
 ./$FOLDER/scripts/lint_migrations.sh
 ./$FOLDER/scripts/migrate.sh plan --sql
-./$FOLDER/scripts/migrate.sh deploy                  # migrate + validate + smoke
+./$FOLDER/scripts/migrate.sh deploy
 \`\`\`
 Windows cmd/PowerShell: \`$FOLDER\\migrate.cmd <command>\`.
 
-Existing database: copy \`config/dev.conf.example\` to \`config/dev.conf\`, put the password in \`config/dev.secret.conf\`,
-then \`./$FOLDER/scripts/migrate.sh --env dev up\` and \`--env dev plan\`. Details: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
-Day-to-day flow (branch, PR, release): [docs/RUNBOOK.md](docs/RUNBOOK.md).
+An existing client database is adopted with \`verify-baseline\` / \`baseline\`, never by running V001 on it:
+[docs/ONBOARDING.md](docs/ONBOARDING.md) part 3. Settings: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 EOF
 
 # ---- repo-level files (only if missing) ----
@@ -136,11 +122,37 @@ else
   grep -q 'eol=lf' "$TARGET/.gitattributes" || echo "  ! add '* text=auto eol=lf' and '*.cmd text eol=crlf' to .gitattributes"
 fi
 WF="$TARGET/.github/workflows/${FOLDER}-schema-ci.yml"
-if [ ! -f "$WF" ] && [ -f "$SRC_DB/../.github/workflows/schema-ci.yml" ]; then
+if [ ! -f "$WF" ]; then
   mkdir -p "$(dirname "$WF")"
-  sed "s#\./db/#./$FOLDER/#g; s# db/docker-compose.yml# $FOLDER/docker-compose.yml#g" "$SRC_DB/../.github/workflows/schema-ci.yml" > "$WF"
+  cat > "$WF" <<EOF
+name: ${FOLDER}-schema-ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  schema:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Lint and config tests
+        run: |
+          ./$FOLDER/scripts/lint_migrations.sh
+          ./$FOLDER/scripts/tests/test_config.sh
+      - name: Merged migrations must not be edited
+        if: github.event_name == 'pull_request'
+        run: BASE_REF=origin/\${{ github.base_ref }} ./$FOLDER/scripts/lint_migrations.sh
+      - name: Fresh install on an empty Oracle (bundled container)
+        run: |
+          printf 'RUNNER=docker\nAPP_ENV=ci\nEXPECTED_DB=FREEPDB1\nDB_SERVICE=FREEPDB1\n' > $FOLDER/.env
+          ./$FOLDER/scripts/migrate.sh up
+          ./$FOLDER/scripts/migrate.sh deploy
+          ./$FOLDER/scripts/migrate.sh plan      # nothing left to apply
+EOF
   echo "  + .github/workflows/${FOLDER}-schema-ci.yml"
 fi
 
 echo "Done. Next:"
-echo "  cd $TARGET && ./$FOLDER/scripts/migrate.sh config && ./$FOLDER/scripts/migrate.sh up"
+echo "  cd $TARGET && cp $FOLDER/.env.example $FOLDER/.env   # then edit it"
+echo "  ./$FOLDER/scripts/migrate.sh config"
