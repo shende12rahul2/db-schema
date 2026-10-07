@@ -1,4 +1,4 @@
-# Views - 3 examples (branch `example/views`, V015)
+# Views - 3 examples (branch `example/views`, V016)
 
 Views are **repeatable** objects: edit the file, run `migrate`, only that file is redeployed.
 
@@ -11,7 +11,7 @@ Added a `pending_loans` column. Because the file is `CREATE OR REPLACE VIEW`, no
 Just add the file (named after the view, in `08_views/`). Lint checks the name and the `CREATE OR REPLACE`.
 Window functions (running balance) are fine in views; make sure the underlying tables have the index the query needs.
 
-## 3. Retire a view (`08_views/v_pending_kyc.vw` removed + `V015__drop_view_pending_kyc.sql`)
+## 3. Retire a view (`08_views/v_pending_kyc.vw` removed + `V016__drop_view_pending_kyc.sql`)
 Deleting the file is **not enough**; the object stays in the database. Add a migration with a **guarded** drop (ignore `ORA-00942`)
 so fresh installs, where the view never existed, still succeed. `validate` prints an info line if you forget the migration.
 Undo recreates the view; after an undo, check out the older code so the file exists again.
@@ -29,9 +29,9 @@ git checkout example/views
 ```bash
 ./db/scripts/migrate.sh plan
 ```
-Expected: `V015` pending; `08_views/v_customer_summary.vw (changed)` and `08_views/v_account_statement.vw (new)` under repeatable files.
+Expected: `V016` pending; `08_views/v_customer_summary.vw (changed)` and `08_views/v_account_statement.vw (new)` under repeatable files.
 
-**V015 + view changes**
+**V016 + view changes**
 ```bash
 ./db/scripts/migrate.sh migrate
 ./db/scripts/migrate.sh sql "SELECT view_name FROM user_views WHERE view_name IN ('V_PENDING_KYC','V_ACCOUNT_STATEMENT','V_CUSTOMER_SUMMARY')"
@@ -39,7 +39,7 @@ Expected: `V015` pending; `08_views/v_customer_summary.vw (changed)` and `08_vie
 ./db/scripts/migrate.sh sql "SELECT * FROM v_account_statement WHERE ROWNUM <= 5"
 ```
 Expected: `V_PENDING_KYC` gone; `V_CUSTOMER_SUMMARY` ends with `PENDING_LOANS`; `V_ACCOUNT_STATEMENT` exists.
-Fresh-install check of the guarded drop: `down`, `up`, `deploy` -> V015 succeeds although the view never existed.
+Fresh-install check of the guarded drop: `down`, `up`, `deploy` -> V016 succeeds although the view never existed.
 
 Finish and prove it is reversible:
 ```bash
