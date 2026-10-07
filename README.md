@@ -24,6 +24,9 @@ legacy/                  original flat layout, reference only (not used by any t
 |---|---|---|
 | Start Oracle (first start takes 1-3 min) | `db\migrate.cmd up` | `./db/scripts/migrate.sh up` |
 | Apply everything | `db\migrate.cmd deploy` | `./db/scripts/migrate.sh deploy` |
+| See what would run (no changes) | `db\migrate.cmd plan` | `./db/scripts/migrate.sh plan` |
+| Apply one migration at a time | `db\migrate.cmd step` | `./db/scripts/migrate.sh step` |
+| Query the DB to verify | `db\migrate.cmd sql "SELECT * FROM schema_version"` | `./db/scripts/migrate.sh sql "SELECT * FROM schema_version"` |
 | Status / validate | `db\migrate.cmd status` / `validate` | `./db/scripts/migrate.sh status` / `validate` |
 | Stop and wipe | `db\migrate.cmd down` | `./db/scripts/migrate.sh down` |
 
@@ -43,6 +46,16 @@ Interactive SQL*Plus: `docker compose -f db/docker-compose.yml exec oracle sqlpl
 Clone note for Windows: `.gitattributes` forces LF line endings so scripts work inside the Linux container. If you cloned before it existed, re-clone or run `git add --renormalize .`.
 
 Already used the earlier `docker run --name oracle-free ...` container? Remove it first: `docker rm -f oracle-free`. If your database was built from the old flat files, run `migrate baseline` once, then `migrate`.
+
+## Flow: branch -> PR -> main -> environments
+
+Step-by-step with expected output and verification queries: **[`db/docs/RUNBOOK.md`](db/docs/RUNBOOK.md)**.
+
+1. Feature branch: add a migration (`new_migration.sh`) and/or edit repeatable files; `lint_migrations.sh`.
+2. Locally: `plan --sql` -> `step` -> verify with `sql "..."` -> `migrate` -> `validate` -> `undo` -> `migrate` (proves rollback).
+3. PR to `main`: CI runs lint, a fresh install, and an undo/redo round trip.
+4. Merge: **no database changes**; `main` is what each environment should reach next.
+5. Release (manual, per environment): `CONN=... ENVIRONMENT=...` `status` -> `plan --sql` -> backup -> `migrate` -> `validate` -> `smoke` -> git tag.
 
 ## How changes are made (short version)
 

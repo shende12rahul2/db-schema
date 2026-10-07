@@ -21,6 +21,8 @@ migrations in order and records each one in a `schema_version` table, so any dat
 Why split this way: tables hold data, so they must be altered step by step. Code objects hold no data, so the
 repo simply states the desired final version and the runner redeploys it.
 
+See also the step-by-step [RUNBOOK](RUNBOOK.md) (branch -> PR -> main -> environments).
+
 Run order on every `migrate`: all pending versioned migrations (ascending), then all changed repeatable files in folder order.
 
 Current versions: V001 baseline, V002 `customers.email_verified`, V003 loan status check, V004 `customer_preferences`
@@ -63,7 +65,10 @@ Daily workflow:
 
 | Command | Purpose |
 |---|---|
-| `migrate` | Apply pending migrations, then changed code objects |
+| `plan` (`--sql`) | Read-only: what `migrate` would run, in order, and why |
+| `step` | Apply only the next pending migration |
+| `sql "..."` | Ad-hoc query for manual verification |
+| `migrate` | Apply pending migrations, then changed/missing repeatable files |
 | `status` | History table and pending list |
 | `validate` | Verify DB history against files; exit code 1 on any problem |
 | `undo` | Revert the **most recent** versioned migration via its `U` file |
@@ -254,7 +259,9 @@ the row is `FAILED`, and you fix the file and run `migrate` again (`CREATE OR RE
 ## 8. How repeatable objects (procedures, packages, views, ...) are handled
 
 - Each file under `db/repeatable/` is tracked **separately** in `schema_version` (type `REPEATABLE`, script = path, SHA-256 checksum).
-- On `migrate`, a file is applied if it is new, its checksum changed, or its last run was `FAILED`. Unchanged files are skipped.
+- On `migrate`, a file is applied if it is **new**, **changed** (checksum), **failed last time**, or its object is **missing in the database**
+  (for example a trigger dropped together with its table by an undo script). Unchanged files are skipped. `plan` shows the reason per file.
+- A type without member methods has no body file: Oracle rejects an empty `TYPE BODY`.
 - Files run in folder order: types, type bodies, functions, procedures, package specs, package bodies, triggers, views.
   After the run the schema is recompiled, so dependency-order mistakes inside a folder do not matter; only objects still INVALID fail the step.
 - Every file must start with `CREATE OR REPLACE` and be named after its object (lint enforces both), so re-running is always safe.
