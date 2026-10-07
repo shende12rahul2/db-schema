@@ -1,0 +1,9 @@
+CREATE TABLE collaterals (
+  collateral_id  NUMBER(10)     NOT NULL,
+  loan_app_id    NUMBER(10)     NOT NULL,
+  collateral_type VARCHAR2(30)  NOT NULL,
+  description    VARCHAR2(255),
+  market_value   NUMBER(18,2)   NOT NULL,
+  CONSTRAINT pk_collaterals PRIMARY KEY (collateral_id),
+  CONSTRAINT fk_collaterals_loan_app_id FOREIGN KEY (loan_app_id) REFERENCES loan_applications (loan_app_id)
+);

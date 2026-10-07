@@ -1,0 +1,10 @@
+CREATE TABLE payments (
+  payment_id     NUMBER(12)     NOT NULL,
+  account_id     NUMBER(10)     NOT NULL,
+  amount         NUMBER(18,2)   NOT NULL,
+  payment_mode   VARCHAR2(15)   NOT NULL,
+  status         VARCHAR2(10)   DEFAULT 'PENDING' NOT NULL,
+  payment_date   TIMESTAMP      DEFAULT SYSTIMESTAMP NOT NULL,
+  CONSTRAINT pk_payments PRIMARY KEY (payment_id),
+  CONSTRAINT fk_payments_account_id FOREIGN KEY (account_id) REFERENCES accounts (account_id)
+);

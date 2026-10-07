@@ -1,0 +1,9 @@
+CREATE TABLE credit_scores (
+  credit_score_id NUMBER(10)    NOT NULL,
+  customer_id    NUMBER(10)     NOT NULL,
+  score          NUMBER(3)      NOT NULL,
+  risk_band      VARCHAR2(10),
+  scored_at      TIMESTAMP      DEFAULT SYSTIMESTAMP NOT NULL,
+  CONSTRAINT pk_credit_scores PRIMARY KEY (credit_score_id),
+  CONSTRAINT fk_credit_scores_customer_id FOREIGN KEY (customer_id) REFERENCES customers (customer_id)
+);

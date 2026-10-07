@@ -1,0 +1,43 @@
+name: schema-ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Lint (naming, undo pairs, repeatable rules)
+        run: ./db/scripts/lint_migrations.sh
+      - name: Merged migrations and baseline must not be edited
+        if: github.event_name == 'pull_request'
+        run: BASE_REF=origin/${{ github.base_ref }} ./db/scripts/lint_migrations.sh
+
+  migrate:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start Oracle (same compose file developers use)
+        run: ./db/scripts/migrate.sh up
+      - name: Plan (what a fresh install runs)
+        run: ./db/scripts/migrate.sh plan
+      - name: Fresh install - migrate, validate, smoke tests
+        run: ./db/scripts/migrate.sh deploy
+      - name: Nothing left to apply
+        run: ./db/scripts/migrate.sh plan
+      - name: Undo/redo round trip of the newest migration
+        run: |
+          if ! ls db/migrations/V*.sql >/dev/null 2>&1; then echo "no migrations yet - skipping"; exit 0; fi
+          ./db/scripts/migrate.sh undo
+          ./db/scripts/migrate.sh migrate
+          ./db/scripts/migrate.sh validate
+      - name: Collect log
+        if: always()
+        run: ./db/scripts/migrate.sh log > migrate.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: migrate-log, path: migrate.log }

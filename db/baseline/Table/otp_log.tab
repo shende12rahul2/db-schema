@@ -1,0 +1,11 @@
+CREATE TABLE otp_log (
+  otp_id         NUMBER(12)     NOT NULL,
+  customer_id    NUMBER(10)     NOT NULL,
+  otp_hash       VARCHAR2(64)   NOT NULL,
+  purpose        VARCHAR2(20),
+  generated_at   TIMESTAMP      DEFAULT SYSTIMESTAMP NOT NULL,
+  expires_at     TIMESTAMP      NOT NULL,
+  verified       CHAR(1)        DEFAULT 'N' NOT NULL,
+  CONSTRAINT pk_otp_log PRIMARY KEY (otp_id),
+  CONSTRAINT fk_otp_log_customer_id FOREIGN KEY (customer_id) REFERENCES customers (customer_id)
+);

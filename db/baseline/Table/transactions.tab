@@ -1,0 +1,10 @@
+CREATE TABLE transactions (
+  transaction_id NUMBER(12)     NOT NULL,
+  account_id     NUMBER(10)     NOT NULL,
+  txn_type       VARCHAR2(10)   NOT NULL,
+  amount         NUMBER(18,2)   NOT NULL,
+  txn_date       TIMESTAMP      DEFAULT SYSTIMESTAMP NOT NULL,
+  description    VARCHAR2(255),
+  CONSTRAINT pk_transactions PRIMARY KEY (transaction_id),
+  CONSTRAINT fk_transactions_account_id FOREIGN KEY (account_id) REFERENCES accounts (account_id)
+);

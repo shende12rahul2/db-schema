@@ -1,0 +1,31 @@
+# Containers used by scripts/migrate.sh. All values come from config/*.conf (exported by the script).
+# Windows cmd: migrate.cmd passes config/default.conf with --env-file.
+services:
+  # Local throw-away Oracle (RUNNER=docker). The migration runner executes inside it.
+  oracle:
+    image: ${ORACLE_IMAGE:-gvenzl/oracle-free:slim}
+    container_name: ${CONTAINER_NAME:-dbproject-oracle}
+    ports:
+      - "${HOST_PORT:-1521}:1521"
+    environment:
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-Oracle123}
+      APP_USER: ${APP_USER:-app}
+      APP_USER_PASSWORD: ${APP_USER_PASSWORD:-App12345}
+    volumes:
+      - ..:/workspace:ro        # the repo, read-only
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  # sqlplus helper for a database you already have (RUNNER=docker-client). Same image, but the DB is NOT started.
+  client:
+    image: ${ORACLE_IMAGE:-gvenzl/oracle-free:slim}
+    container_name: ${CONTAINER_NAME:-dbproject-oracle}-client
+    entrypoint: ["sleep", "infinity"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # reach a DB running on this machine (needed on Linux)
+    volumes:
+      - ..:/workspace:ro
