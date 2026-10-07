@@ -1,5 +1,7 @@
 # Testing on your local machine - step by step
 
+> Your local Oracle **already has the bank tables**? Use [EXISTING_DB_TESTING.md](EXISTING_DB_TESTING.md) instead.
+
 About 30-45 minutes the first time. Each step says what to run, what you should see, and how to check it yourself.
 You change nothing on any shared database: everything runs in a local Docker container that you can wipe at any time.
 

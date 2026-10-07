@@ -71,7 +71,8 @@ Every key, precedence rules and the existing-database walkthrough: [`db/docs/CON
 ## Flow: branch -> PR -> main -> environments
 
 Step-by-step with expected output and verification queries: **[`db/docs/RUNBOOK.md`](db/docs/RUNBOOK.md)**.
-First time? Test everything locally with **[`db/docs/LOCAL_TESTING.md`](db/docs/LOCAL_TESTING.md)** (13 steps, Windows/macOS/Linux).
+First time? Test everything locally with **[`db/docs/LOCAL_TESTING.md`](db/docs/LOCAL_TESTING.md)** (new local DB) or
+**[`db/docs/EXISTING_DB_TESTING.md`](db/docs/EXISTING_DB_TESTING.md)** (your local DB already has the tables: backup, baseline, step-by-step checks, restore).
 
 1. Feature branch: add a migration (`new_migration.sh`) and/or edit repeatable files; `lint_migrations.sh`.
 2. Locally: `plan --sql` -> `step` -> verify with `sql "..."` -> `migrate` -> `validate` -> `undo` -> `migrate` (proves rollback).

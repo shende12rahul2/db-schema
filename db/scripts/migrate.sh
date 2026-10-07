@@ -350,7 +350,13 @@ apply_repeatable() {
 }
 
 preflight() { # common start of migrate/step
-  connect_check; prod_guard "$1"; bootstrap
+  connect_check; prod_guard "$1"
+  # refuse BEFORE creating anything: a schema with tables but no history must be adopted with 'baseline' first
+  if [ "$(q "SELECT COUNT(*) FROM user_tables WHERE table_name='$HIST_UP';" | tr -d '[:space:]')" = "0" ] \
+     && [ "$(q "SELECT COUNT(*) FROM user_tables;" | tr -d '[:space:]')" != "0" ]; then
+    die "the database already has tables but no history in $HIST. Adopt it first: migrate.sh baseline <version>  (see docs/CONFIGURATION.md)"
+  fi
+  bootstrap
   app_tables_without_history && die "the database already has tables but no history in $HIST. Adopt it first: migrate.sh baseline <version>  (see docs/CONFIGURATION.md)"
   validate_core || die "validation failed - fix the problems above first"
   load_applied
@@ -468,6 +474,7 @@ cmd_plan() {
     load_applied; load_repeatable
     cur=$(q "SELECT MAX(TO_NUMBER(version)) FROM $HIST WHERE type IN ('BASELINE','VERSIONED') AND status='SUCCESS';" | tr -d '[:space:]')
     echo "Current  : V${cur:-none}"
+    app_tables_without_history && echo "History  : empty, but the schema already has tables -> run 'baseline <version>' first (migrate will refuse)"
     echo "Checks   :"; if validate_core | sed 's/^/  /'; then echo "  history OK"; else echo "  -> migrate will REFUSE to run until these are fixed"; fi
   fi
   echo

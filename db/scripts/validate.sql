@@ -17,9 +17,9 @@ PROMPT === Function smoke tests ===
 SELECT fn_calc_emi(500000, 9.5, 60) AS emi, fn_mask_mobile('9876543210') AS masked, fn_format_currency(1234567.5) AS money FROM dual;
 
 PROMPT === Insert test (rolled back) ===
-INSERT INTO branches (branch_id, branch_code, branch_name) VALUES (seq_branch_id.NEXTVAL, 'B001', 'Main');
-INSERT INTO customers (first_name, last_name, pan_number, mobile) VALUES ('Asha', 'Rao', 'ABCDE1234F', '9876543210');
-SELECT customer_id, first_name, kyc_status, email_verified FROM customers;
+INSERT INTO branches (branch_id, branch_code, branch_name) VALUES (seq_branch_id.NEXTVAL, 'ZZSMOKE01', 'Smoke test branch');
+INSERT INTO customers (first_name, last_name, pan_number, mobile) VALUES ('Smoke', 'Test', 'ZZZZZ9999Z', '9876543210');
+SELECT customer_id, first_name, kyc_status, email_verified FROM customers WHERE pan_number = 'ZZZZZ9999Z';
 ROLLBACK;
 
 PROMPT === Schema version history ===
