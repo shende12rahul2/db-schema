@@ -1,0 +1,19 @@
+# Local Oracle for development and testing. Works the same on Windows, macOS (incl. Apple Silicon) and Linux.
+services:
+  oracle:
+    image: gvenzl/oracle-free:slim
+    container_name: oracle-free
+    ports:
+      - "1521:1521"
+    environment:
+      ORACLE_PASSWORD: Oracle123
+      APP_USER: bank
+      APP_USER_PASSWORD: Bank123
+    volumes:
+      - ..:/workspace:ro        # the repo, read-only; the runner executes inside the container
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s

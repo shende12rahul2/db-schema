@@ -1,0 +1,9 @@
+CREATE TABLE documents (
+  document_id    NUMBER(10)     NOT NULL,
+  customer_id    NUMBER(10)     NOT NULL,
+  doc_type       VARCHAR2(30)   NOT NULL,
+  file_name      VARCHAR2(255),
+  uploaded_at    TIMESTAMP      DEFAULT SYSTIMESTAMP NOT NULL,
+  CONSTRAINT pk_documents PRIMARY KEY (document_id),
+  CONSTRAINT fk_documents_customer_id FOREIGN KEY (customer_id) REFERENCES customers (customer_id)
+);

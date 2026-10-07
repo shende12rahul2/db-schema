@@ -1,0 +1,13 @@
+CREATE TABLE accounts (
+  account_id     NUMBER(10)     NOT NULL,
+  customer_id    NUMBER(10)     NOT NULL,
+  branch_id      NUMBER(10)     NOT NULL,
+  account_type   VARCHAR2(15)   NOT NULL,
+  balance        NUMBER(18,2)   DEFAULT 0 NOT NULL,
+  status         VARCHAR2(10)   DEFAULT 'ACTIVE' NOT NULL,
+  opened_at      TIMESTAMP      DEFAULT SYSTIMESTAMP NOT NULL,
+  closed_at      TIMESTAMP,
+  CONSTRAINT pk_accounts PRIMARY KEY (account_id),
+  CONSTRAINT fk_accounts_customer_id FOREIGN KEY (customer_id) REFERENCES customers (customer_id),
+  CONSTRAINT fk_accounts_branch_id FOREIGN KEY (branch_id) REFERENCES branches (branch_id)
+);

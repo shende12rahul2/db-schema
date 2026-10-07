@@ -1,142 +1,72 @@
 # db-schema
 
-Oracle PL/SQL schema for a retail banking / lending system. One object per file.
+Oracle PL/SQL schema for a retail banking / lending system, with versioned migrations.
 
-## Repository layout
+```
+db/                      <- live, versioned schema (use this)
+  baseline/              Sequence + Table DDL as first delivered (frozen)
+  migrations/            V<NNN>__name.sql  (run once, in order)   + undo/U<NNN>__name.sql
+  repeatable/            objects that are re-applied whenever their file changes
+    01_types  02_type_bodies  03_functions  04_procedures
+    05_package_specs  06_package_bodies  07_triggers  08_views
+  scripts/               migrate.sh, lint_migrations.sh, new_migration.sh, validate.sql ...
+  docs/                  SCHEMA_VERSIONING.md (guide)  examples/ (one page per change type)
+  docker-compose.yml     local Oracle
+  migrate.cmd            Windows launcher
+legacy/                  original flat layout, reference only (not used by any tool)
+```
 
-| Folder | Ext | Contents | Count |
-|---|---|---|---|
-| `Sequence/` | `.seq` | ID sequences (**frozen baseline**, see Schema versioning) | 12 |
-| `Table/` | `.tab` | Tables (**frozen baseline**; changes go in `migrations/`) | 12 |
-| `Type/` | `.tps` | Object type specs | 11 |
-| `Type_Body/` | `.tpb` | Object type bodies | 11 |
-| `Function/` | `.fnc` | Standalone functions | 11 |
-| `Procedure/` | `.prc` | Standalone procedures | 11 |
-| `Package/` | `.spc` | Package specs | 10 |
-| `Package_Body/` | `.bdy` | Package bodies | 10 |
-| `Trigger/` | `.trg` | Before-insert triggers (ID from sequence) | 11 |
-| `View/` | `.vw` | Reporting views | 11 |
-| `migrations/` | `.sql` | Versioned migrations `V<NNN>__name.sql` and `undo/U<NNN>__name.sql` | 5 |
-| `scripts/` | | `migrate.sh`, `deploy.sh`, `validate.sql`, `new_migration.sh`, `lint_migrations.sh` | |
-| `docs/` | | `SCHEMA_VERSIONING.md` (worked examples) | |
-| `examples/failing/` | | Demo of a failing migration and its recovery | |
+## Run it on your machine (Windows, macOS, Linux)
 
-> `pkg_login_otp` is a placeholder: OTP generation and verification are `TODO` (verify always returns `FALSE`).
-> `branches` and `credit_scores` have sequences but no insert trigger; pass `seq_branch_id.NEXTVAL` / `seq_credit_score_id.NEXTVAL` when inserting.
+**Requirement: Docker only** (Docker Desktop on Windows/macOS, Docker Engine on Linux; Apple Silicon works). Nothing else is installed on your computer: the Oracle client and the migration runner both run inside the container.
 
-## Prerequisites
+| | Windows (cmd or PowerShell) | macOS / Linux (also Git Bash / WSL on Windows) |
+|---|---|---|
+| Start Oracle (first start takes 1-3 min) | `db\migrate.cmd up` | `./db/scripts/migrate.sh up` |
+| Apply everything | `db\migrate.cmd deploy` | `./db/scripts/migrate.sh deploy` |
+| Status / validate | `db\migrate.cmd status` / `validate` | `./db/scripts/migrate.sh status` / `validate` |
+| Stop and wipe | `db\migrate.cmd down` | `./db/scripts/migrate.sh down` |
 
-- Docker (Docker Desktop or Docker Engine) on your machine
-- Git
+`deploy` = `migrate` (pending versioned migrations, then changed repeatable files) + `validate` + smoke tests (`db/scripts/validate.sql`).
+Success ends with `DEPLOY OK`.
 
-The files are Oracle syntax and will not run on PostgreSQL or MySQL.
-
-## 1. Create the database
-
+Static checks (no database needed) and the migration generator are bash scripts: on macOS/Linux run them directly; on Windows use Git Bash or WSL:
 ```bash
-git clone https://github.com/shende12rahul2/db-schema.git
-cd db-schema
-
-docker run -d --name oracle-free -p 1521:1521 \
-  -e ORACLE_PASSWORD=Oracle123 \
-  -e APP_USER=bank -e APP_USER_PASSWORD=Bank123 \
-  gvenzl/oracle-free:slim
-
-docker logs -f oracle-free      # wait for "DATABASE IS READY TO USE!", then Ctrl+C
+./db/scripts/lint_migrations.sh
+./db/scripts/new_migration.sh "add customer nickname"
 ```
+(Without bash you can still create `V<NNN>__name.sql` and `undo/U<NNN>__name.sql` by hand; CI runs the lint for you.)
 
-This creates the schema owner `bank` / `Bank123` in the `FREEPDB1` pluggable database.
+Connection details if you want a GUI (DBeaver, SQL Developer, VS Code): host `localhost`, port `1521`, service `FREEPDB1`, user `bank`, password `Bank123` (admin: `sys` / `Oracle123` as SYSDBA).
+Interactive SQL*Plus: `docker compose -f db/docker-compose.yml exec oracle sqlplus bank/Bank123@//localhost:1521/FREEPDB1`.
 
-| Setting | Value |
-|---|---|
-| Host / Port | `localhost` / `1521` |
-| Service name | `FREEPDB1` |
-| User / Password | `bank` / `Bank123` |
-| Admin | `sys` / `Oracle123` (as SYSDBA) |
+Clone note for Windows: `.gitattributes` forces LF line endings so scripts work inside the Linux container. If you cloned before it existed, re-clone or run `git add --renormalize .`.
 
-## 2. Deploy everything in one go
+Already used the earlier `docker run --name oracle-free ...` container? Remove it first: `docker rm -f oracle-free`. If your database was built from the old flat files, run `migrate baseline` once, then `migrate`.
 
-```bash
-./scripts/deploy.sh
-```
+## How changes are made (short version)
 
-It runs: lint, `migrate.sh migrate` (all pending migrations, then code objects), `migrate.sh validate`, and the smoke tests in `scripts/validate.sql`.
-Output goes to `migrate.log` and `deploy.log`; the script prints `DEPLOY OK` or exits non-zero.
-Run `./scripts/migrate.sh status` at any time to see which version the database is at.
+| Change | Where | Applied |
+|---|---|---|
+| Table, column, index, constraint, sequence, reference data, data fix | new file in `db/migrations/` (+ undo) | once, in order, recorded in `schema_version` |
+| Function, procedure, package (spec + body), trigger, view, object type | edit the file in `db/repeatable/` | automatically when its checksum changes |
+| Remove a repeatable object | delete the file **and** add a migration with a guarded `DROP` | once |
+| Code that needs a new column | migration **and** code change in the same PR | migrations first, then repeatable files |
 
-Already have a database from the earlier version of this repo (tables but no history)? Run `./scripts/migrate.sh baseline` once, then `migrate`.
+Rules: never edit a migration after it is merged; never edit `db/baseline/`; every repeatable file starts with `CREATE OR REPLACE`.
+Lint enforces these. Full guide with failure/recovery scenarios: [`db/docs/SCHEMA_VERSIONING.md`](db/docs/SCHEMA_VERSIONING.md).
+Copy-paste examples for every kind of change: [`db/docs/examples/`](db/docs/examples/README.md).
 
-Override defaults with `CONTAINER=... CONN=... ./scripts/deploy.sh`.
+## Validate
 
-## Schema versioning (how to change the database)
-
-Every change is a numbered migration; the database remembers what has been applied in the `schema_version` table.
-
-```bash
-./scripts/new_migration.sh "add customer nickname"   # creates migrations/V006__... and undo/U006__...
-# write the SQL (and the undo), edit code objects (Function/, Package/, View/ ...) if needed
-./scripts/lint_migrations.sh                          # static checks
-./scripts/migrate.sh migrate                          # apply to your DB
-./scripts/migrate.sh status | validate                # history / verification
-./scripts/migrate.sh undo                             # revert the newest migration
-./scripts/migrate.sh repair                           # after cleaning up a FAILED migration
-```
-
-Rules: never edit a migration after it is merged; table/sequence changes only via migrations; code objects (`Type` .. `View`) are edited in place and redeployed automatically.
-Full guide with 11 worked examples (add column, constraint failure, partial failure, checksum drift, duplicate version numbers, rollback, zero-downtime rename, baseline, invalid objects, out-of-order, hotfix): [`docs/SCHEMA_VERSIONING.md`](docs/SCHEMA_VERSIONING.md).
-CI (`.github/workflows/schema-ci.yml`) runs lint, a fresh install and an undo/redo round trip on every pull request.
-
-## 3. Log in and run commands manually
-
-```bash
-docker exec -it oracle-free sqlplus bank/Bank123@//localhost:1521/FREEPDB1
-```
-
-To apply a single file by hand, copy the repo in and run from that folder:
-
-```bash
-docker cp . oracle-free:/tmp/db-schema
-docker exec -it -w /tmp/db-schema oracle-free sqlplus bank/Bank123@//localhost:1521/FREEPDB1
-```
-```sql
-@Sequence/seq_account_id.seq
-@Table/branches.tab
-SHOW ERRORS
-```
-
-Manual order: Sequence, then Table (`branches`, `customers`, `accounts`, `transactions`, `payments`, `loan_applications`, `collaterals`, `credit_scores`, `documents`, `notifications`, `otp_log`, `audit_logs`), Type, Type_Body, Function, Procedure, Package (all specs), Package_Body, Trigger, View.
-
-## 4. Validate
-
-`deploy.sh` already runs `migrate.sh validate` and this smoke test; to re-run the smoke test alone:
-
-```bash
-docker exec -w /tmp/db-schema oracle-free sqlplus -s bank/Bank123@//localhost:1521/FREEPDB1 @scripts/validate.sql
-```
-
-Expected results:
+`deploy` already runs these; to run them alone: `migrate.sh validate` and `migrate.sh smoke`.
 
 | Check | Expected |
 |---|---|
-| Object counts | SEQUENCE 13, TABLE 14, TYPE 11, FUNCTION 11, PROCEDURE 11, PACKAGE 10, PACKAGE BODY 10, TRIGGER 11, VIEW 11 |
-| Invalid objects | `no rows selected` |
-| Compile errors (`user_errors`) | `no rows selected` |
-| `fn_calc_emi(500000, 9.5, 60)` | an EMI of about 10,500 |
+| `validate` | `VALIDATE OK` (history matches files, no invalid objects) |
+| Object counts (smoke) | SEQUENCE 13, TABLE 14, TYPE 11, FUNCTION 11, PROCEDURE 11, PACKAGE 10, PACKAGE BODY 10, TRIGGER 11, VIEW 11 |
+| `fn_calc_emi(500000, 9.5, 60)` | about 10,500 |
 | `fn_mask_mobile('9876543210')` | `XXXXXX3210` |
-| Insert test | customer row returned with `kyc_status = PENDING`, `email_verified = N` (then rolled back) |
-| `./scripts/migrate.sh validate` | `VALIDATE OK` |
+| Insert test | customer row with `kyc_status = PENDING`, `email_verified = N` (then rolled back) |
 
-Run `SHOW ERRORS` after any file that reports "created with compilation errors".
-
-## 5. Reset / clean up
-
-```bash
-docker rm -f oracle-free        # drops the database and all data
-```
-
-## Notes on dependencies
-
-- Tables must be created parents first because of foreign keys.
-- `pkg_compliance` calls `pkg_audit_service`, so all package specs are created before any body.
-- `fn_is_eligible_for_loan` depends on `fn_get_kyc_status` and `fn_calc_risk_score`.
-- `v_customer_contact_info` depends on `fn_mask_mobile`.
+Notes: `pkg_login_otp` is a placeholder (OTP verify always returns `FALSE`). `branches` and `credit_scores` have sequences but no insert trigger; pass `seq_branch_id.NEXTVAL` / `seq_credit_score_id.NEXTVAL`.

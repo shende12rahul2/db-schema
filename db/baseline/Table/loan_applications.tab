@@ -1,0 +1,12 @@
+CREATE TABLE loan_applications (
+  loan_app_id    NUMBER(10)     NOT NULL,
+  customer_id    NUMBER(10)     NOT NULL,
+  loan_type      VARCHAR2(20)   NOT NULL,
+  requested_amt  NUMBER(18,2)   NOT NULL,
+  tenure_months  NUMBER(3)      NOT NULL,
+  interest_rate  NUMBER(5,2),
+  status         VARCHAR2(15)   DEFAULT 'SUBMITTED' NOT NULL,
+  applied_at     TIMESTAMP      DEFAULT SYSTIMESTAMP NOT NULL,
+  CONSTRAINT pk_loan_applications PRIMARY KEY (loan_app_id),
+  CONSTRAINT fk_loan_applications_customer_id FOREIGN KEY (customer_id) REFERENCES customers (customer_id)
+);

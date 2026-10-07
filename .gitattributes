@@ -1,0 +1,3 @@
+# Keep LF everywhere so scripts and SQL work inside the Linux container even when cloned on Windows.
+* text=auto eol=lf
+*.cmd text eol=crlf

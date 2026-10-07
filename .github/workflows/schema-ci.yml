@@ -10,35 +10,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - name: Lint migrations (naming, undo pairs, duplicates)
-        run: ./scripts/lint_migrations.sh
-      - name: Applied migrations must not be edited
+      - name: Lint (naming, undo pairs, repeatable rules)
+        run: ./db/scripts/lint_migrations.sh
+      - name: Merged migrations and baseline must not be edited
         if: github.event_name == 'pull_request'
-        run: BASE_REF=origin/${{ github.base_ref }} ./scripts/lint_migrations.sh
+        run: BASE_REF=origin/${{ github.base_ref }} ./db/scripts/lint_migrations.sh
 
   migrate:
     runs-on: ubuntu-latest
     needs: lint
     steps:
       - uses: actions/checkout@v4
-      - name: Start Oracle
+      - name: Start Oracle (same compose file developers use)
+        run: ./db/scripts/migrate.sh up
+      - name: Fresh install - migrate, validate, smoke tests
+        run: ./db/scripts/migrate.sh deploy
+      - name: Undo/redo round trip of the newest migration
         run: |
-          docker run -d --name oracle-free -p 1521:1521 \
-            -e ORACLE_PASSWORD=Oracle123 -e APP_USER=bank -e APP_USER_PASSWORD=Bank123 \
-            gvenzl/oracle-free:slim
-          for i in $(seq 1 60); do
-            docker logs oracle-free 2>&1 | grep -q "DATABASE IS READY TO USE" && exit 0
-            sleep 5
-          done
-          echo "Oracle did not start"; docker logs oracle-free; exit 1
-      - name: Fresh install (all migrations + code objects) and validate
-        run: ./scripts/deploy.sh
-      - name: Undo/redo round trip of the latest migration
-        run: |
-          ./scripts/migrate.sh undo
-          ./scripts/migrate.sh migrate
-          ./scripts/migrate.sh validate
-      - name: Upload logs
+          ./db/scripts/migrate.sh undo
+          ./db/scripts/migrate.sh migrate
+          ./db/scripts/migrate.sh validate
+      - name: Collect log
         if: always()
-        uses: actions/upload-artifact@v4
-        with: { name: migrate-logs, path: "*.log" }
+        run: docker compose -f db/docker-compose.yml exec -T oracle cat /tmp/migrate.log > migrate.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: migrate-log, path: migrate.log }

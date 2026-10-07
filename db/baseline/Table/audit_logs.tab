@@ -1,0 +1,10 @@
+CREATE TABLE audit_logs (
+  audit_id       NUMBER(12)     NOT NULL,
+  table_name     VARCHAR2(30)   NOT NULL,
+  operation      VARCHAR2(10)   NOT NULL,
+  record_id      NUMBER,
+  changed_by     VARCHAR2(60)   DEFAULT USER,
+  changed_at     TIMESTAMP      DEFAULT SYSTIMESTAMP NOT NULL,
+  details        VARCHAR2(4000),
+  CONSTRAINT pk_audit_logs PRIMARY KEY (audit_id)
+);
