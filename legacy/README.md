@@ -9,7 +9,7 @@ Where things went:
 |---|---|
 | `Sequence/`, `Table/` | `db/baseline/` (frozen) + `db/migrations/` for every later change |
 | `Type/` | `db/repeatable/01_types/` |
-| `Type_Body/` | `db/repeatable/02_type_bodies/` |
+| `Type_Body/` | `db/repeatable/02_type_bodies/` (only the 3 bodies that have methods; the 8 empty ones cannot compile in Oracle and were dropped - V006 removes them from databases deployed from this folder) |
 | `Function/` | `db/repeatable/03_functions/` |
 | `Procedure/` | `db/repeatable/04_procedures/` |
 | `Package/` | `db/repeatable/05_package_specs/` |
@@ -18,3 +18,5 @@ Where things went:
 | `View/` | `db/repeatable/08_views/` |
 
 Do not edit files here; changes made here will not reach any database.
+
+A database that was deployed from this folder can be adopted by the versioned tooling: see `db/docs/CONFIGURATION.md` section 3 (`baseline`, then `migrate`).

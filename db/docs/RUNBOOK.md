@@ -26,7 +26,9 @@ Commands are shown for macOS/Linux; on Windows replace `./db/scripts/migrate.sh`
 | `smoke` | no (rolled back) | object counts, function results, test insert |
 | `undo` | yes | revert the newest migration |
 | `repair` | history only | clear a FAILED row after you cleaned up |
-| `baseline` | history only | adopt a DB built from the legacy files |
+| `baseline [ver]` | history only | adopt an existing DB: mark migrations up to `ver` as applied |
+| `config` | no | show the effective settings for an environment |
+| `log` | no | print the runner log |
 | `deploy` | yes | `migrate` + `validate` + `smoke` |
 
 ## 0. One-time setup (each developer)
@@ -35,7 +37,7 @@ Commands are shown for macOS/Linux; on Windows replace `./db/scripts/migrate.sh`
 git clone https://github.com/shende12rahul2/db-schema.git && cd db-schema
 ./db/scripts/migrate.sh up          # first start: 1-3 minutes; prints "Oracle is ready."
 ./db/scripts/migrate.sh deploy      # builds the schema at the current version; ends with DEPLOY OK
-./db/scripts/migrate.sh status      # V001..V005 SUCCESS, nothing pending
+./db/scripts/migrate.sh status      # V001..V006 SUCCESS, nothing pending
 ```
 
 ## 1. Make the change on a feature branch
@@ -47,7 +49,7 @@ git checkout -b feature/add-account-nickname
 **Table / column / index / constraint / sequence / data** -> new versioned migration:
 ```bash
 ./db/scripts/new_migration.sh "add account nickname"
-# edit db/migrations/V006__add_account_nickname.sql       ALTER TABLE accounts ADD (nickname VARCHAR2(40));
+# edit db/migrations/V007__add_account_nickname.sql       ALTER TABLE accounts ADD (nickname VARCHAR2(40));
 # edit db/migrations/undo/U006__add_account_nickname.sql  ALTER TABLE accounts DROP COLUMN nickname;
 ```
 **Function / procedure / package / trigger / view / type** -> edit or add the file in `db/repeatable/<folder>/`.
@@ -64,12 +66,12 @@ Both kinds can be in the same branch (typical when code needs a new column).
 ```
 Expected (abridged):
 ```
-Target   : bank@//localhost:1521/FREEPDB1   ENVIRONMENT=local
-Current  : V005
+Target   : bank@//localhost:1521/FREEPDB1   DB_ENV=local
+Current  : V007
 Checks   :
   history OK
 1) Versioned migrations, run once, in this order:
-   1. V006  migrations/V006__add_account_nickname.sql
+   1. V007  migrations/V007__add_account_nickname.sql
         | ALTER TABLE accounts ADD (nickname VARCHAR2(40));
 2) Repeatable files, run after the migrations:
    - repeatable/04_procedures/prc_rename_account.prc  (new)
@@ -92,9 +94,9 @@ Then the rest (repeatable files) and the full check:
 ## 3. Prove the change can be rolled back and re-applied
 
 ```bash
-./db/scripts/migrate.sh undo        # V006 undone (warns if current code needs the column - expected)
-./db/scripts/migrate.sh plan        # V006 pending again; dropped/invalid objects listed
-./db/scripts/migrate.sh migrate     # re-applies V006 and any repeatable object the undo removed
+./db/scripts/migrate.sh undo        # V007 undone (warns if current code needs the column - expected)
+./db/scripts/migrate.sh plan        # V007 pending again; dropped/invalid objects listed
+./db/scripts/migrate.sh migrate     # re-applies V007 and any repeatable object the undo removed
 ./db/scripts/migrate.sh validate
 ```
 Also prove a **fresh install** works (this is what CI does):
@@ -126,26 +128,29 @@ Main stays releasable because every PR passed a fresh install against main.
 
 ## 6. Release to an environment (after merge)
 
-Run from a clean checkout of `main` (or a release tag). For a shared/remote database pass `CONN`; the runner inside the local container connects to it.
+Run from a clean checkout of `main` (or a release tag). Each target database is an **environment** in `db/config/`
+(set up once, see [CONFIGURATION.md](CONFIGURATION.md)): `test.conf` / `prod.conf` hold host, port, service and user
+(committed); the password goes in the git-ignored `test.secret.conf` or the `DB_PASSWORD` environment variable.
 
 ```bash
 git checkout main && git pull
-export CONN='bank/<password>@//test-db.company.local:1521/BANKPDB'   # target DB
-export ENVIRONMENT=test                                                # 'prod' also requires CONFIRM=yes
-
-./db/scripts/migrate.sh up                 # local helper container (runner + sqlplus), if not running
-./db/scripts/migrate.sh status             # where is the target now?
-./db/scripts/migrate.sh plan --sql         # exactly what will run - attach to the change ticket
+./db/scripts/migrate.sh --env test config         # check target + "password: set"
+./db/scripts/migrate.sh --env test up             # small sqlplus helper container (RUNNER=docker-client)
+./db/scripts/migrate.sh --env test status         # where is the target now?
+./db/scripts/migrate.sh --env test plan --sql     # exactly what will run - attach to the change ticket
 # backup / snapshot the target DB here (Data Pump expdp or storage snapshot)
-./db/scripts/migrate.sh migrate            # MIGRATE OK
-./db/scripts/migrate.sh validate           # VALIDATE OK
-./db/scripts/migrate.sh smoke
+./db/scripts/migrate.sh --env test migrate        # MIGRATE OK
+./db/scripts/migrate.sh --env test validate       # VALIDATE OK
+./db/scripts/migrate.sh --env test smoke
 git tag db-release-$(date +%Y%m%d) && git push --tags     # record which commit is deployed
 ```
-Windows (PowerShell): `$env:CONN='bank/...@//host:1521/SVC'; $env:ENVIRONMENT='test'; db\migrate.cmd plan`
+Windows: `db\migrate.cmd --env test plan` (same commands).
 
-Production: same steps with `ENVIRONMENT=prod CONFIRM=yes`, in the agreed window, after the same version passed test.
-The target needs network access from your machine (the container uses your machine's network).
+Production: same steps with `--env prod`; `prod` is listed in `PROTECTED_ENVS`, so `migrate`, `step`, `undo`, `repair` and
+`baseline` also need `CONFIRM=yes` (Windows: `set CONFIRM=yes`). Run it in the agreed window, after the same version passed test.
+The target needs network access from your machine (the helper container uses your machine's network).
+
+First time on a database that already has the schema (no history yet): `--env test baseline <version>` - see CONFIGURATION.md section 3.
 
 Promotion order: **local -> test -> prod**, always the same commit/tag; `status` on each shows the same history.
 
@@ -153,9 +158,9 @@ Promotion order: **local -> test -> prod**, always the same commit/tag; `status`
 
 | Symptom | Meaning | What to do |
 |---|---|---|
-| `cannot connect to Oracle` | container not ready, wrong `CONN` | `up` (wait for "ready"), check `CONN` |
+| `cannot connect to ...` | container not ready, wrong host/port/service/password | `up` (wait for "ready"); `--env <name> config`; check `config/<env>.conf` and `<env>.secret.conf` |
 | `service "oracle" is not running` | container stopped | `migrate.sh up` |
-| `ORA-01017` | wrong user/password | fix `CONN` |
+| `ORA-01017` | wrong user/password | fix `DB_USER` / `DB_PASSWORD` for that environment |
 | `Vnnn FAILED` | statement error; DDL before it is committed | check with `sql`, undo partial changes by hand or with the U file, `repair`, fix file, `migrate` |
 | `is recorded as FAILED` | an earlier failure not repaired | as above |
 | `checksum mismatch` | an applied migration was edited | `git checkout -- <file>`; put the change in a new migration |
@@ -163,10 +168,9 @@ Promotion order: **local -> test -> prod**, always the same commit/tag; `status`
 | `duplicate version number` (lint) | two branches used the same number | renumber the one not yet applied anywhere |
 | `object(s) became invalid` | code no longer compiles against the schema | fix the code in the same PR, `migrate` again |
 | `does not exist in the database` (validate) | a repeatable object was dropped (e.g. by an undo) | `migrate` recreates it |
-| `tables already exist but there is no history` | DB built from legacy files | `baseline`, then `migrate` |
+| `already has tables but no history` | existing schema not yet managed by this tool | `baseline <version>` (CONFIGURATION.md section 3), then `migrate` |
 
-Logs: every statement and its output is in the container log:
-`docker compose -f db/docker-compose.yml exec oracle cat /tmp/migrate.log`.
+Logs: every statement and its output: `./db/scripts/migrate.sh [--env <name>] log`.
 
 ## 8. Verification queries (copy/paste into `sql "..."`)
 
