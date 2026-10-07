@@ -37,7 +37,7 @@ git checkout example/indexes-constraints-sequences
 ```bash
 ./db/scripts/migrate.sh step
 ./db/scripts/migrate.sh sql "SELECT constraint_name, constraint_type, status, validated FROM user_constraints WHERE constraint_name IN ('UK_DOCUMENTS_CUSTOMER_TYPE','CK_CREDIT_SCORES_RANGE','CK_ACCOUNTS_STATUS')"
-./db/scripts/migrate.sh sql "SELECT COUNT(*) AS archived_duplicates FROM documents_dupes_v010"
+./db/scripts/migrate.sh sql "SELECT COUNT(*) AS archived_duplicates FROM documents_dupes_v011"
 ```
 Expected: three constraints `ENABLED`; `CK_ACCOUNTS_STATUS` shows `NOT VALIDATED` (NOVALIDATE).
 Negative test (rolled back): `./db/scripts/migrate.sh sql "UPDATE accounts SET status='BROKEN' WHERE ROWNUM = 1"` -> `ORA-02290: check constraint ... violated` (only if an account exists).
